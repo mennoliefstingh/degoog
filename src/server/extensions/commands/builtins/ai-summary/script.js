@@ -69,7 +69,7 @@
     const messagesEl = box.querySelector(".glance-ai-messages");
     if (!diveBtn || !chatWrap || !input || !messagesEl) return;
 
-    const snippet = box.querySelector(".glance-snippet");
+    const answerEl = box.querySelector(".glance-ai-answer");
     const query = getQuery();
     const context = buildResultsContext();
 
@@ -85,7 +85,7 @@
       },
       {
         role: "assistant",
-        content: snippet ? snippet.textContent || "" : "",
+        content: answerEl ? answerEl.textContent || "" : "",
       },
     ];
 

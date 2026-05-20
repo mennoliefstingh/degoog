@@ -13,6 +13,14 @@ import {
 } from "../../../../utils/cache";
 import { logger } from "../../../../utils/logger";
 import { asBoolean, asString, getSettings } from "../../../../utils/plugin-settings";
+import { parseAiSummary, stripInvalidCitations } from "./parse-summary";
+import {
+  buildFollowups,
+  buildReferences,
+  decorateCitations,
+  renderMarkdownSafe,
+  type SourceResult,
+} from "./render-summary";
 
 export const AI_SUMMARY_ID = "ai-summary";
 
@@ -62,7 +70,7 @@ export const aiSummarySettingsSchema: SettingField[] = [
     key: "maxTokens",
     label: "Max Tokens",
     type: "text",
-    placeholder: "256",
+    placeholder: "1024",
     description:
       "Maximum tokens for the AI response. Bump this up (e.g. 1024+) if you use reasoning/thinking models.",
   },
@@ -91,7 +99,7 @@ export async function getAISummarySettings(): Promise<AISummarySettings> {
   const stored = await getSettings(AI_SUMMARY_ID);
   const timeoutSeconds =
     parseFloat(asString(stored["timeoutSeconds"]) || "") || 30;
-  const maxTokens = parseInt(asString(stored["maxTokens"]) || "", 10) || 256;
+  const maxTokens = parseInt(asString(stored["maxTokens"]) || "", 10) || DEFAULT_MAX_TOKENS;
   return {
     baseUrl: asString(stored["baseUrl"]),
     model: asString(stored["model"]),
@@ -123,10 +131,33 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-const DEFAULT_SYSTEM_PROMPT =
-  "You are a helpful assistant that summarises web search results. Write a concise 2–3 sentence summary answering the query based on the provided snippets. Do not invent facts. Do not include citations.";
+const DEFAULT_SYSTEM_PROMPT = `You are an expert search assistant. Answer the user's query using the provided search results.
 
-const _summaryCache: TtlCache<string> = createCache<string>(SHORT_TTL_MS);
+FORMAT:
+- Use Markdown: **bold**, *italic*, \`inline code\`, fenced code blocks (with language tag), lists.
+- **Bold key phrases** that directly answer the query to improve skimmability.
+- For programming questions, include working code examples.
+- Be concise but thorough. Paraphrase in your own words.
+
+CITATIONS:
+- Cite sources using [N] where N is the 1-indexed result number. Place citations inline after the claim they support.
+- Cite ALL factual claims. Every statement based on a search result must have a citation.
+- To cite multiple sources for one claim: "This is true [1][3]."
+- Do not list sources at the end — only use inline citations.
+
+LANGUAGE:
+- Always respond in the same language as the user's query.
+
+FOLLOW-UP QUESTIONS:
+After your answer, add exactly this block with 3 relevant follow-up questions in the query's language:
+
+\\\`\\\`\\\`followups
+["Question 1?", "Question 2?", "Question 3?"]
+\\\`\\\`\\\``;
+
+const DEFAULT_MAX_TOKENS = 1024;
+
+const _richCache: TtlCache<AISummaryResult> = createCache<AISummaryResult>(SHORT_TTL_MS);
 
 function _summaryCacheKey(query: string, results: ScoredResult[]): string {
   const fp = results
@@ -181,16 +212,25 @@ async function chatComplete(
   }
 }
 
+export interface AISummaryResult {
+  raw: string;
+  html: string;
+  referencesHtml: string;
+  followupsHtml: string;
+  followups: string[];
+  citedIndices: number[];
+}
+
 export async function generateAISummary(
   query: string,
   results: { title: string; url: string; snippet: string }[],
-): Promise<string | null> {
+): Promise<AISummaryResult | null> {
   const settings = await getAISummarySettings();
   if (!settings.baseUrl || !settings.model) return null;
 
-  const context = results
-    .slice(0, 6)
-    .map((r, i) => `[${i + 1}] ${r.title}\n${r.snippet}`)
+  const sliced = results.slice(0, 6);
+  const context = sliced
+    .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}`)
     .join("\n\n");
 
   const messages: OpenAIMessage[] = [
@@ -204,7 +244,30 @@ export async function generateAISummary(
     },
   ];
 
-  return chatComplete(settings, messages);
+  const raw = await chatComplete(settings, messages);
+  if (!raw) return null;
+
+  const sources: SourceResult[] = sliced.map((r) => ({
+    title: r.title,
+    url: r.url,
+    snippet: r.snippet,
+  }));
+
+  const parsed = parseAiSummary(raw, sliced.length);
+  const cleanMd = stripInvalidCitations(parsed.markdown, sliced.length);
+  const baseHtml = renderMarkdownSafe(cleanMd);
+  const html = decorateCitations(baseHtml, sources);
+  const referencesHtml = buildReferences(sources, parsed.citedIndices);
+  const followupsHtml = buildFollowups(parsed.followups, query);
+
+  return {
+    raw,
+    html,
+    referencesHtml,
+    followupsHtml,
+    followups: parsed.followups,
+    citedIndices: parsed.citedIndices,
+  };
 }
 
 export async function chatFollowUp(
@@ -238,21 +301,23 @@ const aiSummarySlot: SlotPlugin = {
     const results = context?.results ?? [];
     if (results.length === 0) return { html: "" };
     const key = _summaryCacheKey(query, results);
-    let summary = _summaryCache.get(key);
-    if (summary === null) {
+    let cached = _richCache.get(key);
+    if (cached === null) {
       const generated = await generateAISummary(query, results);
       if (!generated) return { html: "" };
-      _summaryCache.set(key, generated);
-      summary = generated;
+      _richCache.set(key, generated);
+      cached = generated;
     }
     return {
       html:
         '<div class="glance-ai degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack">' +
         '<div class="glance-ai-messages">' +
-        '<div class="glance-snippet degoog-text degoog-text--md">' +
-        escapeHtml(summary) +
+        '<div class="glance-ai-answer degoog-text degoog-text--md">' +
+        cached.html +
         "</div>" +
         "</div>" +
+        cached.referencesHtml +
+        cached.followupsHtml +
         '<div class="glance-ai-footer">' +
         `<span class="glance-ai-badge degoog-badge">${this.t!("ai-summary.badge")}</span>` +
         `<button class="glance-ai-dive degoog-link-btn" type="button">${this.t!("ai-summary.dive-deeper")}</button>` +

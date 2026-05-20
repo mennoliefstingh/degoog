@@ -17,9 +17,11 @@
     "test:rate-limit": "LOG_LEVEL=debug bun test tests/stress/"
   },
   "dependencies": {
+    "@types/jsdom": "^28.0.3",
     "cheerio": "1.2.0",
     "dompurify": "^3.4.2",
     "hono": "4.12.18",
+    "jsdom": "^29.1.1",
     "marked": "^18.0.3",
     "sass": "1.85.0",
     "socks": "2.8.7"

@@ -1,0 +1,214 @@
+/* AI Summary — Rich Rendering Styles */
+
+/* Answer text */
+.glance-ai-answer {
+  line-height: 1.6;
+}
+
+.glance-ai-answer p {
+  margin: 0.5em 0;
+}
+
+.glance-ai-answer ul,
+.glance-ai-answer ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.glance-ai-answer li {
+  margin: 0.25em 0;
+}
+
+/* Code blocks */
+.glance-ai-answer pre {
+  background: var(--degoog-code-bg, #1e1e2e);
+  color: var(--degoog-code-fg, #cdd6f4);
+  border-radius: 6px;
+  padding: 0.75em 1em;
+  overflow-x: auto;
+  font-size: 0.85em;
+  margin: 0.75em 0;
+}
+
+.glance-ai-answer code {
+  font-family: "SF Mono", "Fira Code", "JetBrains Mono", monospace;
+  font-size: 0.9em;
+}
+
+.glance-ai-answer :not(pre) > code {
+  background: var(--degoog-inline-code-bg, rgba(127, 127, 127, 0.15));
+  padding: 0.15em 0.35em;
+  border-radius: 3px;
+}
+
+/* Citation superscripts */
+.ai-cite {
+  position: relative;
+  font-size: 0.75em;
+  vertical-align: super;
+  line-height: 0;
+  margin: 0 1px;
+}
+
+.ai-cite a {
+  color: var(--degoog-link, #89b4fa);
+  text-decoration: none;
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: var(--degoog-cite-bg, rgba(137, 180, 250, 0.1));
+}
+
+.ai-cite a:hover {
+  background: var(--degoog-cite-bg-hover, rgba(137, 180, 250, 0.25));
+}
+
+/* Citation tooltip */
+.ai-cite-tooltip {
+  display: none;
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--degoog-tooltip-bg, #1e1e2e);
+  border: 1px solid var(--degoog-border, #45475a);
+  border-radius: 8px;
+  padding: 8px 12px;
+  min-width: 200px;
+  max-width: 320px;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  white-space: normal;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+.ai-cite:hover .ai-cite-tooltip {
+  display: block;
+}
+
+.ai-cite-source {
+  display: block;
+  color: var(--degoog-muted, #6c7086);
+  font-size: 0.8em;
+  margin-bottom: 2px;
+}
+
+.ai-cite-tooltip b {
+  display: block;
+  color: var(--degoog-fg, #cdd6f4);
+  margin-bottom: 4px;
+}
+
+.ai-cite-passage {
+  display: block;
+  color: var(--degoog-muted, #a6adc8);
+  font-size: 0.85em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* References section */
+.ai-references {
+  margin-top: 1em;
+  padding-top: 0.75em;
+  border-top: 1px solid var(--degoog-border, #313244);
+}
+
+.ai-references-header {
+  font-size: 0.8em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--degoog-muted, #6c7086);
+  margin: 0 0 0.5em;
+  font-weight: 600;
+}
+
+.ai-ref-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+}
+
+.ai-ref-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  font-size: 0.8em;
+  background: var(--degoog-ref-bg, rgba(127, 127, 127, 0.08));
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.ai-ref-item a {
+  color: var(--degoog-link, #89b4fa);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+.ai-ref-item a:hover {
+  text-decoration: underline;
+}
+
+.ai-ref-domain {
+  color: var(--degoog-muted, #6c7086);
+  font-size: 0.85em;
+}
+
+.ai-ref-pct {
+  color: var(--degoog-muted, #6c7086);
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+
+/* Follow-up suggestions */
+.ai-followups {
+  margin-top: 0.75em;
+  padding-top: 0.75em;
+  border-top: 1px solid var(--degoog-border, #313244);
+}
+
+.ai-followups-header {
+  font-size: 0.8em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--degoog-muted, #6c7086);
+  margin: 0 0 0.5em;
+  font-weight: 600;
+}
+
+.ai-followup-link {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 6px 10px;
+  margin: 4px 0;
+  border-radius: 6px;
+  color: var(--degoog-fg, #cdd6f4);
+  text-decoration: none;
+  background: var(--degoog-followup-bg, rgba(127, 127, 127, 0.06));
+  transition: background 0.15s;
+}
+
+.ai-followup-link:hover {
+  background: var(--degoog-followup-bg-hover, rgba(137, 180, 250, 0.12));
+}
+
+.ai-followup-icon {
+  color: var(--degoog-link, #89b4fa);
+  font-size: 0.9em;
+  flex-shrink: 0;
+}
+
+.ai-followup-text {
+  font-size: 0.9em;
+}
