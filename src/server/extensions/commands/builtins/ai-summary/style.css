@@ -1,5 +1,35 @@
 /* AI Summary — Rich Rendering Styles */
 
+/* Loading skeleton */
+.glance-ai-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.skel-line {
+  height: 14px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--degoog-skel-from, rgba(127, 127, 127, 0.1)) 25%,
+    var(--degoog-skel-to, rgba(127, 127, 127, 0.2)) 50%,
+    var(--degoog-skel-from, rgba(127, 127, 127, 0.1)) 75%
+  );
+  background-size: 200% 100%;
+  animation: skel-pulse 1.5s ease-in-out infinite;
+}
+
+.skel-line--long { width: 90%; }
+.skel-line--med { width: 70%; }
+.skel-line--short { width: 45%; }
+
+@keyframes skel-pulse {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 /* Answer text */
 .glance-ai-answer {
   line-height: 1.6;

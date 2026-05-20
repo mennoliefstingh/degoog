@@ -38,17 +38,20 @@ export function parseAiSummary(raw: string, resultCount: number): ParsedSummary 
     }
   }
 
-  // Extract valid citation indices from the markdown
+  // Extract valid citation indices from the markdown (skip fenced code blocks)
   const citedIndices: number[] = [];
   const seen = new Set<number>();
-  let match: RegExpExecArray | null;
-  const citRegex = new RegExp(CITATION_PATTERN.source, "g");
-
-  while ((match = citRegex.exec(markdown)) !== null) {
-    const idx = parseInt(match[1], 10);
-    if (idx >= 1 && idx <= resultCount && !seen.has(idx)) {
-      seen.add(idx);
-      citedIndices.push(idx);
+  const parts = markdown.split(/(```[\s\S]*?```)/g);
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) continue; // skip code blocks
+    let match: RegExpExecArray | null;
+    const citRegex = new RegExp(CITATION_PATTERN.source, "g");
+    while ((match = citRegex.exec(parts[i])) !== null) {
+      const idx = parseInt(match[1], 10);
+      if (idx >= 1 && idx <= resultCount && !seen.has(idx)) {
+        seen.add(idx);
+        citedIndices.push(idx);
+      }
     }
   }
 
@@ -63,8 +66,16 @@ export function stripInvalidCitations(
   markdown: string,
   resultCount: number,
 ): string {
-  return markdown.replace(CITATION_PATTERN, (full, numStr) => {
-    const idx = parseInt(numStr, 10);
-    return idx >= 1 && idx <= resultCount ? full : "";
-  });
+  // Split on fenced code blocks to avoid stripping inside them
+  const parts = markdown.split(/(```[\s\S]*?```)/g);
+  return parts
+    .map((part, i) => {
+      // Odd indices are fenced code blocks — leave them untouched
+      if (i % 2 === 1) return part;
+      return part.replace(CITATION_PATTERN, (full, numStr) => {
+        const idx = parseInt(numStr, 10);
+        return idx >= 1 && idx <= resultCount ? full : "";
+      });
+    })
+    .join("");
 }

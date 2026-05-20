@@ -15,6 +15,19 @@ import { buildSignedProxyUrl } from "../utils/proxy-sign";
 import { getClientIp } from "../utils/request";
 import { _applyRateLimit, runSlotPlugins } from "../utils/search";
 import { injectScope, translateHTML } from "../utils/translation";
+import {
+  chatCompleteStream,
+  getAISummarySettings,
+  AI_SUMMARY_ID,
+} from "../extensions/commands/builtins/ai-summary/index";
+import { parseAiSummary, stripInvalidCitations } from "../extensions/commands/builtins/ai-summary/parse-summary";
+import {
+  renderMarkdownSafe,
+  decorateCitations,
+  buildReferences,
+  buildFollowups,
+  type SourceResult,
+} from "../extensions/commands/builtins/ai-summary/render-summary";
 
 const router = new Hono();
 
@@ -102,6 +115,95 @@ router.post("/api/slots/glance", async (c) => {
     }
   }
   return c.json({ panels });
+});
+
+router.post("/api/ai-summary/stream", async (c) => {
+  const limitRes = await _applyRateLimit(c);
+  if (limitRes) return limitRes;
+
+  let body: { query?: string; results?: ScoredResult[] };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+  if (!body.query || !Array.isArray(body.results) || body.results.length === 0) {
+    return c.json({ error: "Missing query or results" }, 400);
+  }
+
+  const settings = await getAISummarySettings();
+  if (!settings.baseUrl || !settings.model) {
+    return c.json({ error: "AI summary not configured" }, 503);
+  }
+
+  const query = body.query.trim();
+  const sliced = body.results.slice(0, 6);
+  const sources: SourceResult[] = sliced.map((r) => ({
+    title: r.title,
+    url: r.url,
+    snippet: r.snippet ?? "",
+  }));
+
+  c.header("Content-Type", "text/event-stream");
+  c.header("Cache-Control", "no-cache");
+  c.header("Connection", "keep-alive");
+  c.header("X-Accel-Buffering", "no");
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const encoder = new TextEncoder();
+      const send = (event: string, data: unknown) => {
+        controller.enqueue(
+          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+        );
+      };
+
+      let accumulated = "";
+      let tokenCount = 0;
+
+      try {
+        for await (const chunk of chatCompleteStream(query, sliced)) {
+          if (chunk.type === "token") {
+            accumulated += chunk.text;
+            tokenCount++;
+            // Re-render every 3 tokens to avoid flickering while staying responsive
+            if (tokenCount % 3 === 0) {
+              const html = renderMarkdownSafe(stripInvalidCitations(accumulated, sliced.length));
+              const decorated = decorateCitations(html, sources);
+              send("tokens", { html: decorated });
+            }
+          } else if (chunk.type === "done") {
+            const parsed = parseAiSummary(chunk.full, sliced.length);
+            const cleanMd = stripInvalidCitations(parsed.markdown, sliced.length);
+            const finalHtml = decorateCitations(renderMarkdownSafe(cleanMd), sources);
+            const referencesHtml = buildReferences(sources, parsed.citedIndices);
+            const followupsHtml = buildFollowups(parsed.followups, query);
+
+            send("done", {
+              html: finalHtml,
+              references: referencesHtml,
+              followups: followupsHtml,
+              followupQuestions: parsed.followups,
+            });
+          }
+        }
+      } catch (err) {
+        logger.warn(AI_SUMMARY_ID, "Stream error", err);
+        send("error", { message: "Stream failed" });
+      }
+
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
 });
 
 export default router;

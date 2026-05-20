@@ -62,12 +62,101 @@
     textarea.style.height = textarea.scrollHeight + "px";
   }
 
+  /** Start streaming from /api/ai-summary/stream and progressively render */
+  async function startStream(box) {
+    const query = box.dataset.streamQuery;
+    const resultsJson = box.dataset.streamResults;
+    if (!query || !resultsJson) return;
+
+    const answerEl = box.querySelector(".glance-ai-answer");
+    const footerEl = box.querySelector(".glance-ai-footer");
+    const diveBtn = box.querySelector(".glance-ai-dive");
+    if (!answerEl) return;
+
+    let results;
+    try {
+      results = JSON.parse(resultsJson);
+    } catch {
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/ai-summary/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, results }),
+      });
+
+      if (!res.ok || !res.body) {
+        answerEl.innerHTML = "<p>" + t("ai-summary.request-failed") + "</p>";
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+
+        for (const eventBlock of events) {
+          const lines = eventBlock.split("\n");
+          let eventType = "";
+          let data = "";
+          for (const line of lines) {
+            if (line.startsWith("event: ")) eventType = line.slice(7);
+            else if (line.startsWith("data: ")) data = line.slice(6);
+          }
+          if (!eventType || !data) continue;
+
+          try {
+            const parsed = JSON.parse(data);
+            if (eventType === "tokens") {
+              answerEl.innerHTML = parsed.html;
+            } else if (eventType === "done") {
+              answerEl.innerHTML = parsed.html;
+              // Insert references and followups before footer
+              if (parsed.references && footerEl) {
+                footerEl.insertAdjacentHTML("beforebegin", parsed.references);
+              }
+              if (parsed.followups && footerEl) {
+                footerEl.insertAdjacentHTML("beforebegin", parsed.followups);
+              }
+              // Show dive-deeper button
+              if (diveBtn) diveBtn.hidden = false;
+              // Remove stream attributes (no longer needed)
+              delete box.dataset.streamQuery;
+              delete box.dataset.streamResults;
+            } else if (eventType === "error") {
+              answerEl.innerHTML =
+                "<p>" + t("ai-summary.request-failed") + "</p>";
+            }
+          } catch {
+            // skip malformed event data
+          }
+        }
+      }
+    } catch {
+      answerEl.innerHTML = "<p>" + t("ai-summary.request-failed") + "</p>";
+    }
+  }
+
   function handleSetup(box) {
     const diveBtn = box.querySelector(".glance-ai-dive");
     const chatWrap = box.querySelector(".glance-ai-chat");
     const input = box.querySelector(".glance-ai-input");
     const messagesEl = box.querySelector(".glance-ai-messages");
     if (!diveBtn || !chatWrap || !input || !messagesEl) return;
+
+    // If this is a streaming placeholder, start the stream
+    if (box.dataset.streamQuery) {
+      startStream(box);
+    }
 
     const answerEl = box.querySelector(".glance-ai-answer");
     const query = getQuery();

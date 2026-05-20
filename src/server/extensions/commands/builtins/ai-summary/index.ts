@@ -159,6 +159,27 @@ const DEFAULT_MAX_TOKENS = 1024;
 
 const _richCache: TtlCache<AISummaryResult> = createCache<AISummaryResult>(SHORT_TTL_MS);
 
+function _buildFullHtml(result: AISummaryResult, t: (key: string) => string): string {
+  return (
+    '<div class="glance-ai degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack">' +
+    '<div class="glance-ai-messages">' +
+    '<div class="glance-ai-answer degoog-text degoog-text--md">' +
+    result.html +
+    "</div>" +
+    "</div>" +
+    result.referencesHtml +
+    result.followupsHtml +
+    '<div class="glance-ai-footer">' +
+    `<span class="glance-ai-badge degoog-badge">${t("ai-summary.badge")}</span>` +
+    `<button class="glance-ai-dive degoog-link-btn" type="button">${t("ai-summary.dive-deeper")}</button>` +
+    "</div>" +
+    '<div class="glance-ai-chat" hidden>' +
+    `<textarea class="glance-ai-input degoog-input degoog-input--chat" placeholder="${t("ai-summary.follow-up-placeholder")}" rows="1"></textarea>` +
+    "</div>" +
+    "</div>"
+  );
+}
+
 function _summaryCacheKey(query: string, results: ScoredResult[]): string {
   const fp = results
     .slice(0, 6)
@@ -210,6 +231,89 @@ async function chatComplete(
   } catch {
     return null;
   }
+}
+
+/**
+ * Stream chat completions from the LLM. Yields token strings as they arrive.
+ * Returns null if the request fails or settings are misconfigured.
+ */
+export async function* chatCompleteStream(
+  query: string,
+  results: { title: string; url: string; snippet: string }[],
+): AsyncGenerator<{ type: "token"; text: string } | { type: "done"; full: string }> {
+  const settings = await getAISummarySettings();
+  if (!settings.baseUrl || !settings.model) return;
+
+  const sliced = results.slice(0, 6);
+  const context = sliced
+    .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}`)
+    .join("\n\n");
+
+  const messages: OpenAIMessage[] = [
+    { role: "system", content: settings.systemPrompt || DEFAULT_SYSTEM_PROMPT },
+    { role: "user", content: `Query: ${query}\n\nSearch results:\n${context}` },
+  ];
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (settings.apiKey) headers["Authorization"] = `Bearer ${settings.apiKey}`;
+
+  let res: Response;
+  try {
+    res = await fetch(`${settings.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: settings.model,
+        messages,
+        max_tokens: settings.maxTokens,
+        stream: true,
+      }),
+      signal: AbortSignal.timeout(settings.timeoutMs * 2),
+    });
+  } catch {
+    return;
+  }
+  if (!res.ok || !res.body) return;
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let full = "";
+
+  const reader = res.body!.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const payload = line.slice(6).trim();
+        if (payload === "[DONE]") {
+          yield { type: "done" as const, full };
+          return;
+        }
+        try {
+          const parsed = JSON.parse(payload);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            full += delta;
+            yield { type: "token" as const, text: delta };
+          }
+        } catch {
+          // skip malformed SSE chunks
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  // If stream ended without [DONE]
+  if (full) yield { type: "done" as const, full };
 }
 
 export interface AISummaryResult {
@@ -300,27 +404,31 @@ const aiSummarySlot: SlotPlugin = {
   async execute(query, context): Promise<{ title?: string; html: string }> {
     const results = context?.results ?? [];
     if (results.length === 0) return { html: "" };
+
+    // Check if we have a cached result — if so, serve it immediately (no streaming needed)
     const key = _summaryCacheKey(query, results);
-    let cached = _richCache.get(key);
-    if (cached === null) {
-      const generated = await generateAISummary(query, results);
-      if (!generated) return { html: "" };
-      _richCache.set(key, generated);
-      cached = generated;
+    const cached = _richCache.get(key);
+    if (cached !== null) {
+      return {
+        html: _buildFullHtml(cached, this.t!),
+      };
     }
+
+    // No cache — return streaming placeholder. Client JS will call /api/ai-summary/stream.
+    const resultsPayload = JSON.stringify(
+      results.slice(0, 6).map((r) => ({ title: r.title, url: r.url, snippet: r.snippet })),
+    );
     return {
       html:
-        '<div class="glance-ai degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack">' +
+        `<div class="glance-ai degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack" data-stream-query="${escapeHtml(query)}" data-stream-results='${resultsPayload.replace(/'/g, "&#39;")}'>` +
         '<div class="glance-ai-messages">' +
         '<div class="glance-ai-answer degoog-text degoog-text--md">' +
-        cached.html +
+        '<div class="glance-ai-skeleton"><div class="skel-line skel-line--long"></div><div class="skel-line skel-line--med"></div><div class="skel-line skel-line--short"></div></div>' +
         "</div>" +
         "</div>" +
-        cached.referencesHtml +
-        cached.followupsHtml +
         '<div class="glance-ai-footer">' +
         `<span class="glance-ai-badge degoog-badge">${this.t!("ai-summary.badge")}</span>` +
-        `<button class="glance-ai-dive degoog-link-btn" type="button">${this.t!("ai-summary.dive-deeper")}</button>` +
+        `<button class="glance-ai-dive degoog-link-btn" type="button" hidden>${this.t!("ai-summary.dive-deeper")}</button>` +
         "</div>" +
         '<div class="glance-ai-chat" hidden>' +
         `<textarea class="glance-ai-input degoog-input degoog-input--chat" placeholder="${this.t!("ai-summary.follow-up-placeholder")}" rows="1"></textarea>` +
