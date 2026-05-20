@@ -17,10 +17,11 @@ import { _applyRateLimit, runSlotPlugins } from "../utils/search";
 import { injectScope, translateHTML } from "../utils/translation";
 import {
   chatCompleteStream,
+  generateFollowups,
   getAISummarySettings,
   AI_SUMMARY_ID,
 } from "../extensions/commands/builtins/ai-summary/index";
-import { parseAiSummary, stripInvalidCitations } from "../extensions/commands/builtins/ai-summary/parse-summary";
+import { stripInvalidCitations } from "../extensions/commands/builtins/ai-summary/parse-summary";
 import {
   renderMarkdownSafe,
   decorateCitations,
@@ -200,21 +201,44 @@ router.post("/api/ai-summary/stream", async (c) => {
               send("tokens", { html: decorated });
             }
           } else if (chunk.type === "done") {
-            const parsed = parseAiSummary(chunk.full, sliced.length);
-            const cleanMd = stripInvalidCitations(parsed.markdown, sliced.length);
+            // Strip any leftover followups fence the LLM may have included
+            const cleanedFull = chunk.full.replace(/```followups[\s\S]*?```/g, "").trim();
+            const cleanMd = stripInvalidCitations(cleanedFull, sliced.length);
             const finalHtml = decorateCitations(renderMarkdownSafe(cleanMd), sources);
+
+            // Extract cited indices for references
+            const citedIndices: number[] = [];
+            const seen = new Set<number>();
+            const citRegex = /\[(\d+)\]/g;
+            let m: RegExpExecArray | null;
+            while ((m = citRegex.exec(cleanedFull)) !== null) {
+              const idx = parseInt(m[1], 10);
+              if (idx >= 1 && idx <= sliced.length && !seen.has(idx)) {
+                seen.add(idx);
+                citedIndices.push(idx);
+              }
+            }
 
             if (streamMode === "compact") {
               send("done", { html: finalHtml, references: "", followups: "", followupQuestions: [] });
             } else {
-              const referencesHtml = buildReferences(sources, parsed.citedIndices);
-              const followupsHtml = buildFollowups(parsed.followups, query);
+              const referencesHtml = buildReferences(sources, citedIndices);
+              // Generate followups in parallel (non-blocking for the done event)
+              const answerText = cleanedFull.slice(0, 500);
+              generateFollowups(query, answerText).then((followupQuestions) => {
+                const followupsHtml = buildFollowups(followupQuestions, query);
+                send("followups", { followups: followupsHtml, followupQuestions });
+                controller.close();
+              }).catch(() => {
+                controller.close();
+              });
               send("done", {
                 html: finalHtml,
                 references: referencesHtml,
-                followups: followupsHtml,
-                followupQuestions: parsed.followups,
+                followups: "",
+                followupQuestions: [],
               });
+              return; // Don't close controller yet — wait for followups
             }
           }
         }

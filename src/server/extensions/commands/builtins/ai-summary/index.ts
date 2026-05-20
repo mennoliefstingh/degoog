@@ -13,7 +13,7 @@ import {
 } from "../../../../utils/cache";
 import { logger } from "../../../../utils/logger";
 import { asBoolean, asString, getSettings } from "../../../../utils/plugin-settings";
-import { parseAiSummary, stripInvalidCitations } from "./parse-summary";
+import { stripInvalidCitations } from "./parse-summary";
 import {
   buildFollowups,
   buildReferences,
@@ -97,9 +97,9 @@ export const aiSummarySettingsSchema: SettingField[] = [
     label: "Custom System Prompt",
     type: "textarea",
     placeholder:
-      "You are a helpful assistant that summarises web search results. Write a concise 2–3 sentence summary answering the query based on the provided snippets. Do not invent facts. Do not include citations.",
+      "You are an expert search assistant. Answer the user's query using the provided search results. Use Markdown, bold key phrases, cite with [N]. Respond in the query's language.",
     description:
-      "Override the default system prompt sent to the AI. Leave blank to use the default.",
+      "Override the default system prompt sent to the AI. Leave blank to use the built-in prompt.",
   },
 ];
 
@@ -164,6 +164,7 @@ FORMAT:
 - **Bold key phrases** that directly answer the query to improve skimmability.
 - For programming questions, include working code examples.
 - Be concise but thorough. Paraphrase in your own words.
+- Do not reflect on the quality of the search results.
 
 CITATIONS:
 - Cite sources using [N] where N is the 1-indexed result number. Place citations inline after the claim they support.
@@ -172,14 +173,7 @@ CITATIONS:
 - Do not list sources at the end — only use inline citations.
 
 LANGUAGE:
-- Always respond in the same language as the user's query.
-
-FOLLOW-UP QUESTIONS:
-After your answer, add exactly this block with 3 relevant follow-up questions in the query's language:
-
-\\\`\\\`\\\`followups
-["Question 1?", "Question 2?", "Question 3?"]
-\\\`\\\`\\\``;
+- Always respond in the same language as the user's query.`;
 
 const COMPACT_SYSTEM_PROMPT = `You are a concise search assistant. Answer the user's query in 3-5 sentences using the provided search results.
 
@@ -188,8 +182,10 @@ RULES:
 - **Bold key phrases** for quick scanning.
 - Cite sources with [N] inline after claims.
 - Respond in the same language as the query.
-- No follow-up questions, no code blocks unless essential.
-- Do NOT add a followups block.`;
+- No code blocks unless essential.
+- Do not reflect on the quality of the search results.`;
+
+const FOLLOWUPS_SYSTEM_PROMPT = `Generate 3 short follow-up questions the user might ask next, based on the query and the answer provided. Return ONLY a JSON array of strings. Respond in the same language as the query.`;
 
 const DEFAULT_MAX_TOKENS = 1024;
 
@@ -280,6 +276,41 @@ async function chatComplete(
   } catch {
     return null;
   }
+}
+
+/**
+ * Generate follow-up questions separately (non-streaming, small token budget).
+ * Returns an array of question strings, or empty array on failure.
+ */
+export async function generateFollowups(
+  query: string,
+  answerSummary: string,
+): Promise<string[]> {
+  const settings = await getAISummarySettings();
+  if (!settings.baseUrl || !settings.model) return [];
+
+  const messages: OpenAIMessage[] = [
+    { role: "system", content: FOLLOWUPS_SYSTEM_PROMPT },
+    { role: "user", content: `Query: ${query}\n\nAnswer summary: ${answerSummary.slice(0, 500)}` },
+  ];
+
+  const raw = await chatComplete(settings, messages, 150);
+  if (!raw) return [];
+
+  try {
+    // Try to extract JSON array from the response
+    const jsonMatch = raw.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return [];
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter((q): q is string => typeof q === "string" && q.trim().length > 0)
+        .slice(0, 3);
+    }
+  } catch {
+    // Malformed JSON — skip
+  }
+  return [];
 }
 
 /**
@@ -412,20 +443,38 @@ export async function generateAISummary(
     snippet: r.snippet,
   }));
 
-  const parsed = parseAiSummary(raw, sliced.length);
-  const cleanMd = stripInvalidCitations(parsed.markdown, sliced.length);
+  // Strip any leftover followups fence (LLM might still produce one from custom prompt)
+  const cleanedRaw = raw.replace(/```followups[\s\S]*?```/g, "").trim();
+  const cleanMd = stripInvalidCitations(cleanedRaw, sliced.length);
   const baseHtml = renderMarkdownSafe(cleanMd);
   const html = decorateCitations(baseHtml, sources);
-  const referencesHtml = buildReferences(sources, parsed.citedIndices);
-  const followupsHtml = buildFollowups(parsed.followups, query);
+
+  // Extract cited indices
+  const citedIndices: number[] = [];
+  const seen = new Set<number>();
+  const citRegex = /\[(\d+)\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = citRegex.exec(cleanedRaw)) !== null) {
+    const idx = parseInt(match[1], 10);
+    if (idx >= 1 && idx <= sliced.length && !seen.has(idx)) {
+      seen.add(idx);
+      citedIndices.push(idx);
+    }
+  }
+
+  const referencesHtml = buildReferences(sources, citedIndices);
+
+  // Generate followups separately
+  const followups = await generateFollowups(query, cleanedRaw.slice(0, 500));
+  const followupsHtml = buildFollowups(followups, query);
 
   return {
-    raw,
+    raw: cleanedRaw,
     html,
     referencesHtml,
     followupsHtml,
-    followups: parsed.followups,
-    citedIndices: parsed.citedIndices,
+    followups,
+    citedIndices,
   };
 }
 

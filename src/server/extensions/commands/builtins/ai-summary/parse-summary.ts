@@ -5,7 +5,7 @@
  * - Cited source indices (validated against result count)
  */
 
-const FOLLOWUPS_FENCE = /```followups\s*\n([\s\S]*?)```/;
+const FOLLOWUPS_FENCE = /```followups\s*\n?([\s\S]*?)```/;
 const CITATION_PATTERN = /\[(\d+)\]/g;
 
 export interface ParsedSummary {

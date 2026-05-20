@@ -96,6 +96,83 @@
       return;
     }
 
+    /** Handle a single parsed SSE event */
+    function handleEvent(eventType, parsed) {
+      if (eventType === "tokens") {
+        let streamHtml = parsed.html;
+        // Strip partial followups code block during streaming
+        const fIdx = streamHtml.indexOf('<code class="language-followups"');
+        if (fIdx !== -1) {
+          const blockStart = streamHtml.lastIndexOf('<div class="ai-code-block">', fIdx);
+          if (blockStart !== -1) streamHtml = streamHtml.slice(0, blockStart);
+        }
+        answerEl.innerHTML = streamHtml;
+      } else if (eventType === "done") {
+        answerEl.innerHTML = parsed.html;
+        setupCopyButtons(answerEl);
+
+        if (mode === "full" && parsed.references) {
+          const showBtn = document.createElement("button");
+          showBtn.className = "ai-show-more";
+          showBtn.type = "button";
+          showBtn.textContent = "Show More \u2228";
+          answerEl.after(showBtn);
+
+          const extraDiv = document.createElement("div");
+          extraDiv.className = "glance-ai-extra";
+          extraDiv.hidden = true;
+          extraDiv.innerHTML =
+            (parsed.references || "") +
+            '<div class="glance-ai-followups-slot"></div>' +
+            '<div class="glance-ai-chat">' +
+            '<textarea class="glance-ai-input degoog-input degoog-input--chat" placeholder="' + t("ai-summary.follow-up-placeholder") + '" rows="1"></textarea>' +
+            "</div>";
+          showBtn.after(extraDiv);
+
+          showBtn.addEventListener("click", function () {
+            if (extraDiv.hidden) {
+              extraDiv.hidden = false;
+              showBtn.textContent = "Show Less \u2227";
+            } else {
+              extraDiv.hidden = true;
+              showBtn.textContent = "Show More \u2228";
+            }
+          });
+
+          setupChat(box, extraDiv);
+        }
+
+        delete box.dataset.streamQuery;
+        delete box.dataset.streamResults;
+        delete box.dataset.streamMode;
+      } else if (eventType === "followups") {
+        const slot = box.querySelector(".glance-ai-followups-slot");
+        if (slot && parsed.followups) {
+          slot.innerHTML = parsed.followups;
+        }
+      } else if (eventType === "error") {
+        answerEl.innerHTML = "<p>" + t("ai-summary.request-failed") + "</p>";
+      }
+    }
+
+    /** Parse SSE text into event objects */
+    function parseSSE(text) {
+      const eventBlocks = text.split("\n\n");
+      for (const block of eventBlocks) {
+        if (!block.trim()) continue;
+        const lines = block.split("\n");
+        let eventType = "";
+        let data = "";
+        for (const line of lines) {
+          if (line.startsWith("event: ")) eventType = line.slice(7);
+          else if (line.startsWith("data: ")) data = line.slice(6);
+        }
+        if (eventType && data) {
+          try { handleEvent(eventType, JSON.parse(data)); } catch {}
+        }
+      }
+    }
+
     try {
       const res = await fetch("/api/ai-summary/stream", {
         method: "POST",
@@ -103,93 +180,49 @@
         body: JSON.stringify({ query, results, mode }),
       });
 
-      if (!res.ok || !res.body) {
+      if (!res.ok) {
         answerEl.innerHTML = "<p>" + t("ai-summary.request-failed") + "</p>";
         return;
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+      // Try streaming with ReadableStream (progressive rendering)
+      if (res.body && typeof res.body.getReader === "function") {
+        try {
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split("\n\n");
-        buffer = events.pop() || "";
-
-        for (const eventBlock of events) {
-          const lines = eventBlock.split("\n");
-          let eventType = "";
-          let data = "";
-          for (const line of lines) {
-            if (line.startsWith("event: ")) eventType = line.slice(7);
-            else if (line.startsWith("data: ")) data = line.slice(6);
-          }
-          if (!eventType || !data) continue;
-
-          try {
-            const parsed = JSON.parse(data);
-            if (eventType === "tokens") {
-              // Strip partial followups code block that may appear during streaming
-              let streamHtml = parsed.html;
-              const fIdx = streamHtml.indexOf('<code class="language-followups"');
-              if (fIdx !== -1) {
-                const blockStart = streamHtml.lastIndexOf('<div class="ai-code-block">', fIdx);
-                if (blockStart !== -1) streamHtml = streamHtml.slice(0, blockStart);
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const events = buffer.split("\n\n");
+            buffer = events.pop() || "";
+            for (const block of events) {
+              if (!block.trim()) continue;
+              const lines = block.split("\n");
+              let eventType = "";
+              let data = "";
+              for (const line of lines) {
+                if (line.startsWith("event: ")) eventType = line.slice(7);
+                else if (line.startsWith("data: ")) data = line.slice(6);
               }
-              answerEl.innerHTML = streamHtml;
-            } else if (eventType === "done") {
-              answerEl.innerHTML = parsed.html;
-              setupCopyButtons(answerEl);
-
-              // In full mode, inject references/followups/chat as expandable section
-              if (mode === "full" && (parsed.references || parsed.followups)) {
-                const showBtn = document.createElement("button");
-                showBtn.className = "ai-show-more";
-                showBtn.type = "button";
-                showBtn.textContent = "Show More \u2228";
-                answerEl.after(showBtn);
-
-                const extraDiv = document.createElement("div");
-                extraDiv.className = "glance-ai-extra";
-                extraDiv.hidden = true;
-                extraDiv.innerHTML =
-                  (parsed.references || "") +
-                  (parsed.followups || "") +
-                  '<div class="glance-ai-chat">' +
-                  '<textarea class="glance-ai-input degoog-input degoog-input--chat" placeholder="' + t("ai-summary.follow-up-placeholder") + '" rows="1"></textarea>' +
-                  "</div>";
-                showBtn.after(extraDiv);
-
-                showBtn.addEventListener("click", function () {
-                  if (extraDiv.hidden) {
-                    extraDiv.hidden = false;
-                    showBtn.textContent = "Show Less \u2227";
-                  } else {
-                    extraDiv.hidden = true;
-                    showBtn.textContent = "Show More \u2228";
-                  }
-                });
-
-                // Set up chat in the extra section
-                setupChat(box, extraDiv);
+              if (eventType && data) {
+                try { handleEvent(eventType, JSON.parse(data)); } catch {}
               }
-
-              delete box.dataset.streamQuery;
-              delete box.dataset.streamResults;
-              delete box.dataset.streamMode;
-            } else if (eventType === "error") {
-              answerEl.innerHTML =
-                "<p>" + t("ai-summary.request-failed") + "</p>";
             }
-          } catch {
-            // skip malformed event data
           }
+          // Process any remaining buffer
+          if (buffer.trim()) parseSSE(buffer);
+          return;
+        } catch {
+          // ReadableStream failed — fall through to text() fallback
         }
       }
+
+      // Fallback: read entire response as text (iOS Safari compatibility)
+      const text = await res.text();
+      parseSSE(text);
     } catch {
       answerEl.innerHTML = "<p>" + t("ai-summary.request-failed") + "</p>";
     }
