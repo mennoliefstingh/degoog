@@ -1,7 +1,4 @@
 (function () {
-  const glanceEl = document.getElementById("at-a-glance");
-  if (!glanceEl) return;
-
   /** @type {{ role: string; content: string }[]} */
   let history = [];
 
@@ -62,15 +59,34 @@
     textarea.style.height = textarea.scrollHeight + "px";
   }
 
+  /** Wire up copy buttons */
+  function setupCopyButtons(container) {
+    container.querySelectorAll(".ai-code-copy").forEach((btn) => {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = "1";
+      btn.addEventListener("click", function () {
+        const codeEl = btn.closest(".ai-code-block")?.querySelector("code");
+        if (!codeEl) return;
+        navigator.clipboard.writeText(codeEl.textContent || "").then(() => {
+          btn.textContent = "Copied!";
+          btn.classList.add("copied");
+          setTimeout(() => {
+            btn.textContent = "Copy";
+            btn.classList.remove("copied");
+          }, 2000);
+        });
+      });
+    });
+  }
+
   /** Start streaming from /api/ai-summary/stream and progressively render */
   async function startStream(box) {
     const query = box.dataset.streamQuery;
     const resultsJson = box.dataset.streamResults;
+    const mode = box.dataset.streamMode || "full";
     if (!query || !resultsJson) return;
 
     const answerEl = box.querySelector(".glance-ai-answer");
-    const footerEl = box.querySelector(".glance-ai-footer");
-    const diveBtn = box.querySelector(".glance-ai-dive");
     if (!answerEl) return;
 
     let results;
@@ -84,7 +100,7 @@
       const res = await fetch("/api/ai-summary/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, results }),
+        body: JSON.stringify({ query, results, mode }),
       });
 
       if (!res.ok || !res.body) {
@@ -120,18 +136,44 @@
               answerEl.innerHTML = parsed.html;
             } else if (eventType === "done") {
               answerEl.innerHTML = parsed.html;
-              // Insert references and followups before footer
-              if (parsed.references && footerEl) {
-                footerEl.insertAdjacentHTML("beforebegin", parsed.references);
+              setupCopyButtons(answerEl);
+
+              // In full mode, inject references/followups/chat as expandable section
+              if (mode === "full" && (parsed.references || parsed.followups)) {
+                const showBtn = document.createElement("button");
+                showBtn.className = "ai-show-more";
+                showBtn.type = "button";
+                showBtn.textContent = "Show More \u2228";
+                answerEl.after(showBtn);
+
+                const extraDiv = document.createElement("div");
+                extraDiv.className = "glance-ai-extra";
+                extraDiv.hidden = true;
+                extraDiv.innerHTML =
+                  (parsed.references || "") +
+                  (parsed.followups || "") +
+                  '<div class="glance-ai-chat">' +
+                  '<textarea class="glance-ai-input degoog-input degoog-input--chat" placeholder="' + t("ai-summary.follow-up-placeholder") + '" rows="1"></textarea>' +
+                  "</div>";
+                showBtn.after(extraDiv);
+
+                showBtn.addEventListener("click", function () {
+                  if (extraDiv.hidden) {
+                    extraDiv.hidden = false;
+                    showBtn.textContent = "Show Less \u2227";
+                  } else {
+                    extraDiv.hidden = true;
+                    showBtn.textContent = "Show More \u2228";
+                  }
+                });
+
+                // Set up chat in the extra section
+                setupChat(box, extraDiv);
               }
-              if (parsed.followups && footerEl) {
-                footerEl.insertAdjacentHTML("beforebegin", parsed.followups);
-              }
-              // Show dive-deeper button
-              if (diveBtn) diveBtn.hidden = false;
-              // Remove stream attributes (no longer needed)
+
               delete box.dataset.streamQuery;
               delete box.dataset.streamResults;
+              delete box.dataset.streamMode;
             } else if (eventType === "error") {
               answerEl.innerHTML =
                 "<p>" + t("ai-summary.request-failed") + "</p>";
@@ -146,17 +188,11 @@
     }
   }
 
-  function handleSetup(box) {
-    const diveBtn = box.querySelector(".glance-ai-dive");
-    const chatWrap = box.querySelector(".glance-ai-chat");
-    const input = box.querySelector(".glance-ai-input");
-    const messagesEl = box.querySelector(".glance-ai-messages");
-    if (!diveBtn || !chatWrap || !input || !messagesEl) return;
-
-    // If this is a streaming placeholder, start the stream
-    if (box.dataset.streamQuery) {
-      startStream(box);
-    }
+  /** Set up the follow-up chat functionality */
+  function setupChat(box, container) {
+    const input = container.querySelector(".glance-ai-input");
+    const messagesEl = box.querySelector(".glance-ai-messages") || container;
+    if (!input) return;
 
     const answerEl = box.querySelector(".glance-ai-answer");
     const query = getQuery();
@@ -178,12 +214,6 @@
       },
     ];
 
-    diveBtn.addEventListener("click", function () {
-      diveBtn.hidden = true;
-      chatWrap.hidden = false;
-      input.focus();
-    });
-
     input.addEventListener("input", function () {
       autoResize(input);
     });
@@ -191,17 +221,25 @@
     input.addEventListener("keydown", function (e) {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        sendMessage(input, messagesEl, chatWrap);
+        sendMessage(input, container);
       }
     });
   }
 
-  async function sendMessage(input, messagesEl) {
+  async function sendMessage(input, container) {
     const text = input.value.trim();
     if (!text) return;
 
+    // Create messages area if needed
+    let messagesEl = container.querySelector(".glance-ai-messages");
+    if (!messagesEl) {
+      messagesEl = document.createElement("div");
+      messagesEl.className = "glance-ai-messages";
+      input.before(messagesEl);
+    }
+
     const userDiv = document.createElement("div");
-    userDiv.className="glance-ai-reply glance-ai-user";
+    userDiv.className = "glance-ai-reply glance-ai-user";
     userDiv.textContent = text;
     messagesEl.appendChild(userDiv);
 
@@ -210,7 +248,7 @@
     autoResize(input);
 
     const typingDiv = document.createElement("div");
-    typingDiv.className="glance-ai-typing";
+    typingDiv.className = "glance-ai-typing";
     typingDiv.textContent = t("ai-summary.thinking");
     messagesEl.appendChild(typingDiv);
 
@@ -226,19 +264,19 @@
       if (data.reply) {
         history.push({ role: "assistant", content: data.reply });
         const replyDiv = document.createElement("div");
-        replyDiv.className="glance-ai-reply";
+        replyDiv.className = "glance-ai-reply";
         replyDiv.innerHTML = _renderMarkdown(data.reply);
         messagesEl.appendChild(replyDiv);
       } else {
         const errDiv = document.createElement("div");
-        errDiv.className="glance-ai-typing";
+        errDiv.className = "glance-ai-typing";
         errDiv.textContent = t("ai-summary.no-response");
         messagesEl.appendChild(errDiv);
       }
     } catch {
       typingDiv.remove();
       const errDiv = document.createElement("div");
-      errDiv.className="glance-ai-typing";
+      errDiv.className = "glance-ai-typing";
       errDiv.textContent = t("ai-summary.request-failed");
       messagesEl.appendChild(errDiv);
     }
@@ -246,18 +284,56 @@
     input.focus();
   }
 
-  const observer = new MutationObserver(function () {
-    const box = glanceEl.querySelector(".glance-ai");
-    if (box && !box.dataset.chatInit) {
-      box.dataset.chatInit = "1";
-      handleSetup(box);
+  function handleSetup(box) {
+    // If this is a streaming placeholder, start the stream
+    if (box.dataset.streamQuery) {
+      startStream(box);
+      return;
     }
-  });
-  observer.observe(glanceEl, { childList: true, subtree: true });
 
-  const existing = glanceEl.querySelector(".glance-ai");
-  if (existing && !existing.dataset.chatInit) {
-    existing.dataset.chatInit = "1";
-    handleSetup(existing);
+    // Cached full response — wire up interactions
+    setupCopyButtons(box);
+
+    // Wire up "Show more" button if present
+    const showBtn = box.querySelector(".ai-show-more");
+    const extraDiv = box.querySelector(".glance-ai-extra");
+    if (showBtn && extraDiv) {
+      showBtn.addEventListener("click", function () {
+        if (extraDiv.hidden) {
+          extraDiv.hidden = false;
+          showBtn.textContent = "Show Less \u2227";
+        } else {
+          extraDiv.hidden = true;
+          showBtn.textContent = "Show More \u2228";
+        }
+      });
+      setupChat(box, extraDiv);
+    }
   }
+
+  /** Watch for .glance-ai elements appearing in the DOM (works with SPA navigation) */
+  function watchForGlanceAi() {
+    const observer = new MutationObserver(function () {
+      const glanceEl = document.getElementById("at-a-glance");
+      if (!glanceEl) return;
+      const box = glanceEl.querySelector(".glance-ai");
+      if (box && !box.dataset.chatInit) {
+        box.dataset.chatInit = "1";
+        handleSetup(box);
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    // Also check immediately in case element already exists
+    const glanceEl = document.getElementById("at-a-glance");
+    if (glanceEl) {
+      const existing = glanceEl.querySelector(".glance-ai");
+      if (existing && !existing.dataset.chatInit) {
+        existing.dataset.chatInit = "1";
+        handleSetup(existing);
+      }
+    }
+  }
+
+  watchForGlanceAi();
 })();

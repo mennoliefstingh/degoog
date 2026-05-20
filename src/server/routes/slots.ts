@@ -121,7 +121,7 @@ router.post("/api/ai-summary/stream", async (c) => {
   const limitRes = await _applyRateLimit(c);
   if (limitRes) return limitRes;
 
-  let body: { query?: string; results?: ScoredResult[] };
+  let body: { query?: string; results?: ScoredResult[]; mode?: string };
   try {
     body = await c.req.json();
   } catch {
@@ -137,6 +137,7 @@ router.post("/api/ai-summary/stream", async (c) => {
   }
 
   const query = body.query.trim();
+  const streamMode = (body.mode === "compact" ? "compact" : "full") as "full" | "compact";
   const sliced = body.results.slice(0, 6);
   const sources: SourceResult[] = sliced.map((r) => ({
     title: r.title,
@@ -162,7 +163,7 @@ router.post("/api/ai-summary/stream", async (c) => {
       let tokenCount = 0;
 
       try {
-        for await (const chunk of chatCompleteStream(query, sliced)) {
+        for await (const chunk of chatCompleteStream(query, sliced, streamMode)) {
           if (chunk.type === "token") {
             accumulated += chunk.text;
             tokenCount++;
@@ -176,15 +177,19 @@ router.post("/api/ai-summary/stream", async (c) => {
             const parsed = parseAiSummary(chunk.full, sliced.length);
             const cleanMd = stripInvalidCitations(parsed.markdown, sliced.length);
             const finalHtml = decorateCitations(renderMarkdownSafe(cleanMd), sources);
-            const referencesHtml = buildReferences(sources, parsed.citedIndices);
-            const followupsHtml = buildFollowups(parsed.followups, query);
 
-            send("done", {
-              html: finalHtml,
-              references: referencesHtml,
-              followups: followupsHtml,
-              followupQuestions: parsed.followups,
-            });
+            if (streamMode === "compact") {
+              send("done", { html: finalHtml, references: "", followups: "", followupQuestions: [] });
+            } else {
+              const referencesHtml = buildReferences(sources, parsed.citedIndices);
+              const followupsHtml = buildFollowups(parsed.followups, query);
+              send("done", {
+                html: finalHtml,
+                references: referencesHtml,
+                followups: followupsHtml,
+                followupQuestions: parsed.followups,
+              });
+            }
           }
         }
       } catch (err) {

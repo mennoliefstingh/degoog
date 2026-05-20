@@ -155,26 +155,49 @@ After your answer, add exactly this block with 3 relevant follow-up questions in
 ["Question 1?", "Question 2?", "Question 3?"]
 \\\`\\\`\\\``;
 
+const COMPACT_SYSTEM_PROMPT = `You are a concise search assistant. Answer the user's query in 3-5 sentences using the provided search results.
+
+RULES:
+- Be extremely concise. Maximum 4-5 sentences.
+- **Bold key phrases** for quick scanning.
+- Cite sources with [N] inline after claims.
+- Respond in the same language as the query.
+- No follow-up questions, no code blocks unless essential.
+- Do NOT add a followups block.`;
+
 const DEFAULT_MAX_TOKENS = 1024;
 
 const _richCache: TtlCache<AISummaryResult> = createCache<AISummaryResult>(SHORT_TTL_MS);
 
-function _buildFullHtml(result: AISummaryResult, t: (key: string) => string): string {
+function _buildFullHtml(result: AISummaryResult, t: (key: string) => string, mode: "full" | "compact"): string {
+  if (mode === "compact") {
+    return (
+      '<div class="glance-ai glance-ai--compact degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack">' +
+      '<div class="glance-ai-answer degoog-text degoog-text--md">' +
+      result.html +
+      "</div>" +
+      '<div class="glance-ai-footer">' +
+      `<span class="glance-ai-badge degoog-badge">${t("ai-summary.badge")}</span>` +
+      "</div>" +
+      "</div>"
+    );
+  }
+  // Full mode — answer + "Show more" toggle for references/followups/chat
   return (
-    '<div class="glance-ai degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack">' +
-    '<div class="glance-ai-messages">' +
+    '<div class="glance-ai glance-ai--full degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack">' +
     '<div class="glance-ai-answer degoog-text degoog-text--md">' +
     result.html +
     "</div>" +
-    "</div>" +
+    '<button class="ai-show-more" type="button">Show More ∨</button>' +
+    '<div class="glance-ai-extra" hidden>' +
     result.referencesHtml +
     result.followupsHtml +
+    '<div class="glance-ai-chat">' +
+    `<textarea class="glance-ai-input degoog-input degoog-input--chat" placeholder="${t("ai-summary.follow-up-placeholder")}" rows="1"></textarea>` +
+    "</div>" +
+    "</div>" +
     '<div class="glance-ai-footer">' +
     `<span class="glance-ai-badge degoog-badge">${t("ai-summary.badge")}</span>` +
-    `<button class="glance-ai-dive degoog-link-btn" type="button">${t("ai-summary.dive-deeper")}</button>` +
-    "</div>" +
-    '<div class="glance-ai-chat" hidden>' +
-    `<textarea class="glance-ai-input degoog-input degoog-input--chat" placeholder="${t("ai-summary.follow-up-placeholder")}" rows="1"></textarea>` +
     "</div>" +
     "</div>"
   );
@@ -240,6 +263,7 @@ async function chatComplete(
 export async function* chatCompleteStream(
   query: string,
   results: { title: string; url: string; snippet: string }[],
+  mode: "full" | "compact" = "full",
 ): AsyncGenerator<{ type: "token"; text: string } | { type: "done"; full: string }> {
   const settings = await getAISummarySettings();
   if (!settings.baseUrl || !settings.model) return;
@@ -249,8 +273,13 @@ export async function* chatCompleteStream(
     .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}`)
     .join("\n\n");
 
+  const systemPrompt = mode === "compact"
+    ? COMPACT_SYSTEM_PROMPT
+    : (settings.systemPrompt || DEFAULT_SYSTEM_PROMPT);
+  const maxTokens = mode === "compact" ? Math.min(256, settings.maxTokens) : settings.maxTokens;
+
   const messages: OpenAIMessage[] = [
-    { role: "system", content: settings.systemPrompt || DEFAULT_SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt },
     { role: "user", content: `Query: ${query}\n\nSearch results:\n${context}` },
   ];
 
@@ -267,7 +296,7 @@ export async function* chatCompleteStream(
       body: JSON.stringify({
         model: settings.model,
         messages,
-        max_tokens: settings.maxTokens,
+        max_tokens: maxTokens,
         stream: true,
       }),
       signal: AbortSignal.timeout(settings.timeoutMs * 2),
@@ -398,19 +427,22 @@ const aiSummarySlot: SlotPlugin = {
   async trigger(query: string): Promise<boolean> {
     const settings = await getAISummarySettings();
     if (!settings.baseUrl || !settings.model) return false;
-    if (settings.questionMarkOnly && !query.trim().endsWith("?")) return false;
+    // Always trigger when plugin is enabled — mode (compact/full) determined in execute()
     return true;
   },
   async execute(query, context): Promise<{ title?: string; html: string }> {
     const results = context?.results ?? [];
     if (results.length === 0) return { html: "" };
 
+    const isFullMode = query.trim().endsWith("?");
+    const mode = isFullMode ? "full" : "compact";
+
     // Check if we have a cached result — if so, serve it immediately (no streaming needed)
     const key = _summaryCacheKey(query, results);
     const cached = _richCache.get(key);
     if (cached !== null) {
       return {
-        html: _buildFullHtml(cached, this.t!),
+        html: _buildFullHtml(cached, this.t!, mode),
       };
     }
 
@@ -418,20 +450,30 @@ const aiSummarySlot: SlotPlugin = {
     const resultsPayload = JSON.stringify(
       results.slice(0, 6).map((r) => ({ title: r.title, url: r.url, snippet: r.snippet })),
     );
+
+    if (mode === "compact") {
+      return {
+        html:
+          `<div class="glance-ai glance-ai--compact degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack" data-stream-query="${escapeHtml(query)}" data-stream-results='${resultsPayload.replace(/'/g, "&#39;")}' data-stream-mode="compact">` +
+          '<div class="glance-ai-answer degoog-text degoog-text--md">' +
+          '<div class="glance-ai-skeleton"><div class="skel-line skel-line--long"></div><div class="skel-line skel-line--med"></div></div>' +
+          "</div>" +
+          '<div class="glance-ai-footer">' +
+          `<span class="glance-ai-badge degoog-badge">${this.t!("ai-summary.badge")}</span>` +
+          "</div>" +
+          "</div>",
+      };
+    }
+
+    // Full mode placeholder
     return {
       html:
-        `<div class="glance-ai degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack" data-stream-query="${escapeHtml(query)}" data-stream-results='${resultsPayload.replace(/'/g, "&#39;")}'>` +
-        '<div class="glance-ai-messages">' +
+        `<div class="glance-ai glance-ai--full degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack" data-stream-query="${escapeHtml(query)}" data-stream-results='${resultsPayload.replace(/'/g, "&#39;")}' data-stream-mode="full">` +
         '<div class="glance-ai-answer degoog-text degoog-text--md">' +
         '<div class="glance-ai-skeleton"><div class="skel-line skel-line--long"></div><div class="skel-line skel-line--med"></div><div class="skel-line skel-line--short"></div></div>' +
         "</div>" +
-        "</div>" +
         '<div class="glance-ai-footer">' +
         `<span class="glance-ai-badge degoog-badge">${this.t!("ai-summary.badge")}</span>` +
-        `<button class="glance-ai-dive degoog-link-btn" type="button" hidden>${this.t!("ai-summary.dive-deeper")}</button>` +
-        "</div>" +
-        '<div class="glance-ai-chat" hidden>' +
-        `<textarea class="glance-ai-input degoog-input degoog-input--chat" placeholder="${this.t!("ai-summary.follow-up-placeholder")}" rows="1"></textarea>` +
         "</div>" +
         "</div>",
     };

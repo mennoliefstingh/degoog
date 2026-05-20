@@ -1,14 +1,61 @@
 /**
  * Rendering utilities for the AI Summary:
- * - Markdown → sanitized HTML
+ * - Markdown → sanitized HTML (with syntax highlighting)
  * - Citation decoration (context-aware, skips code blocks)
  * - References section HTML
  * - Follow-up suggestions HTML
  */
 
 import { marked } from "marked";
+import { markedHighlight } from "marked-highlight";
 import DOMPurify from "dompurify";
 import { JSDOM } from "jsdom";
+import hljs from "highlight.js/lib/core";
+
+// Register a useful subset of languages
+import javascript from "highlight.js/lib/languages/javascript";
+import typescript from "highlight.js/lib/languages/typescript";
+import python from "highlight.js/lib/languages/python";
+import bash from "highlight.js/lib/languages/bash";
+import css from "highlight.js/lib/languages/css";
+import xml from "highlight.js/lib/languages/xml"; // covers HTML
+import json from "highlight.js/lib/languages/json";
+import go from "highlight.js/lib/languages/go";
+import rust from "highlight.js/lib/languages/rust";
+import sql from "highlight.js/lib/languages/sql";
+import yaml from "highlight.js/lib/languages/yaml";
+
+hljs.registerLanguage("javascript", javascript);
+hljs.registerLanguage("js", javascript);
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("ts", typescript);
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("py", python);
+hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("sh", bash);
+hljs.registerLanguage("shell", bash);
+hljs.registerLanguage("css", css);
+hljs.registerLanguage("html", xml);
+hljs.registerLanguage("xml", xml);
+hljs.registerLanguage("json", json);
+hljs.registerLanguage("go", go);
+hljs.registerLanguage("rust", rust);
+hljs.registerLanguage("rs", rust);
+hljs.registerLanguage("sql", sql);
+hljs.registerLanguage("yaml", yaml);
+hljs.registerLanguage("yml", yaml);
+
+// Configure marked with highlight.js via marked-highlight extension
+marked.use(
+  markedHighlight({
+    highlight(code: string, lang: string) {
+      if (lang && hljs.getLanguage(lang)) {
+        return hljs.highlight(code, { language: lang }).value;
+      }
+      return hljs.highlightAuto(code).value;
+    },
+  }),
+);
 
 // Server-side DOMPurify needs a window from jsdom
 const window = new JSDOM("").window;
@@ -32,8 +79,18 @@ const ALLOWED_TAGS = [
   "span",
   "div",
   "blockquote",
+  "button",
 ];
-const ALLOWED_ATTR = ["href", "class", "data-cite", "title", "target", "rel"];
+const ALLOWED_ATTR = [
+  "href",
+  "class",
+  "data-cite",
+  "data-code",
+  "title",
+  "target",
+  "rel",
+  "aria-label",
+];
 
 export interface SourceResult {
   title: string;
@@ -42,15 +99,35 @@ export interface SourceResult {
 }
 
 /**
- * Convert markdown to sanitized HTML.
+ * Convert markdown to sanitized HTML with syntax highlighting and copy buttons.
  */
 export function renderMarkdownSafe(md: string): string {
   const raw = marked.parse(md, { async: false }) as string;
-  return purify.sanitize(raw, {
+  const sanitized = purify.sanitize(raw, {
     ALLOWED_TAGS,
     ALLOWED_ATTR,
     ALLOW_DATA_ATTR: true,
   });
+  // Wrap <pre><code> blocks with a container that includes a copy button
+  return sanitized.replace(
+    /<pre><code(?:\s+class="([^"]*)")?>([\s\S]*?)<\/code><\/pre>/g,
+    (_match, langClass, code) => {
+      const langLabel = langClass
+        ? langClass.replace(/^language-/, "").replace(/^hljs\s*/, "")
+        : "";
+      return (
+        `<div class="ai-code-block">` +
+        `<div class="ai-code-header">` +
+        (langLabel
+          ? `<span class="ai-code-lang">${_escapeHtml(langLabel)}</span>`
+          : "") +
+        `<button class="ai-code-copy" aria-label="Copy code">Copy</button>` +
+        `</div>` +
+        `<pre><code${langClass ? ` class="${langClass}"` : ""}>${code}</code></pre>` +
+        `</div>`
+      );
+    },
+  );
 }
 
 /**
@@ -99,6 +176,7 @@ export function decorateCitations(
 
 /**
  * Build the references section HTML from cited sources.
+ * Vertical numbered list matching Kagi's design.
  */
 export function buildReferences(
   results: SourceResult[],
@@ -123,12 +201,15 @@ export function buildReferences(
       const count = citeCounts.get(idx) ?? 1;
       const pct = Math.round((count / totalCitations) * 100);
       const domain = _extractDomain(source.url);
+      const pctDisplay = pct < 1 ? "< 1%" : `${pct}%`;
 
       return (
         `<li class="ai-ref-item">` +
-        `<a href="${_escapeAttr(source.url)}" target="_blank" rel="noopener">${_escapeHtml(source.title)}</a>` +
+        `<a class="ai-ref-title" href="${_escapeAttr(source.url)}" target="_blank" rel="noopener">${_escapeHtml(source.title)}</a>` +
+        `<span class="ai-ref-meta">` +
         `<span class="ai-ref-domain">${_escapeHtml(domain)}</span>` +
-        `<span class="ai-ref-pct" style="--pct: ${pct}%">${pct}%</span>` +
+        `<span class="ai-ref-pct">${pctDisplay}</span>` +
+        `</span>` +
         `</li>`
       );
     })
@@ -137,7 +218,7 @@ export function buildReferences(
 
   return (
     `<div class="ai-references">` +
-    `<h4 class="ai-references-header">References</h4>` +
+    `<h4 class="ai-section-header">References</h4>` +
     `<ol class="ai-ref-list">${items}</ol>` +
     `</div>`
   );
@@ -163,7 +244,7 @@ export function buildFollowups(followups: string[], query: string): string {
 
   return (
     `<div class="ai-followups">` +
-    `<h4 class="ai-followups-header">Related</h4>` +
+    `<h4 class="ai-section-header">Related</h4>` +
     `${items}` +
     `</div>`
   );
