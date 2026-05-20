@@ -1,5 +1,10 @@
 /* AI Summary — Rich Rendering Styles */
 
+/* Hide followups code block during streaming (it flashes before done event removes it) */
+.ai-code-block:has(code.language-followups) {
+  display: none;
+}
+
 /* Loading skeleton */
 .glance-ai-skeleton {
   display: flex;

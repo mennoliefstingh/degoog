@@ -75,6 +75,24 @@ export const aiSummarySettingsSchema: SettingField[] = [
       "Maximum tokens for the AI response. Bump this up (e.g. 1024+) if you use reasoning/thinking models.",
   },
   {
+    key: "extendedContext",
+    label: "Extended context (full mode)",
+    type: "select",
+    options: ["off", "top3", "all"],
+    default: "off",
+    description:
+      "In full mode (? queries), scrape page content for richer AI answers. 'top3' scrapes top 3 results; 'all' scrapes all 6. Adds 1-3s latency.",
+  },
+  {
+    key: "extendedContextBudget",
+    label: "Scrape budget per page (chars)",
+    type: "number",
+    default: "800",
+    placeholder: "800",
+    description:
+      "Maximum characters to extract from each scraped page. Higher = better context but more tokens.",
+  },
+  {
     key: "systemPrompt",
     label: "Custom System Prompt",
     type: "textarea",
@@ -93,6 +111,8 @@ export interface AISummarySettings {
   systemPrompt: string;
   maxTokens: number;
   questionMarkOnly: boolean;
+  extendedContext: "off" | "top3" | "all";
+  extendedContextBudget: number;
 }
 
 export async function getAISummarySettings(): Promise<AISummarySettings> {
@@ -100,6 +120,10 @@ export async function getAISummarySettings(): Promise<AISummarySettings> {
   const timeoutSeconds =
     parseFloat(asString(stored["timeoutSeconds"]) || "") || 30;
   const maxTokens = parseInt(asString(stored["maxTokens"]) || "", 10) || DEFAULT_MAX_TOKENS;
+  const rawExtCtx = asString(stored["extendedContext"]).toLowerCase();
+  const extendedContext: AISummarySettings["extendedContext"] =
+    rawExtCtx === "top3" || rawExtCtx === "all" ? rawExtCtx : "off";
+  const rawBudget = parseInt(asString(stored["extendedContextBudget"]) || "", 10);
   return {
     baseUrl: asString(stored["baseUrl"]),
     model: asString(stored["model"]),
@@ -108,6 +132,8 @@ export async function getAISummarySettings(): Promise<AISummarySettings> {
     systemPrompt: asString(stored["systemPrompt"]),
     maxTokens: Math.max(16, maxTokens),
     questionMarkOnly: asBoolean(stored["questionMarkOnly"]),
+    extendedContext,
+    extendedContextBudget: Number.isFinite(rawBudget) && rawBudget > 0 ? rawBudget : 800,
   };
 }
 

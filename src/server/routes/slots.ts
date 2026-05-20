@@ -139,10 +139,36 @@ router.post("/api/ai-summary/stream", async (c) => {
   const query = body.query.trim();
   const streamMode = (body.mode === "compact" ? "compact" : "full") as "full" | "compact";
   const sliced = body.results.slice(0, 6);
-  const sources: SourceResult[] = sliced.map((r) => ({
+
+  // Extended context: scrape pages in full mode if enabled
+  let enrichedResults = sliced.map((r) => ({
     title: r.title,
     url: r.url,
     snippet: r.snippet ?? "",
+  }));
+
+  if (streamMode === "full" && settings.extendedContext !== "off") {
+    const { fetchExtract } = await import("../utils/page-extract");
+    const queryTerms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const scrapeCount = settings.extendedContext === "all" ? sliced.length : Math.min(3, sliced.length);
+    const budget = settings.extendedContextBudget;
+
+    const scrapePromises = sliced.slice(0, scrapeCount).map((r) =>
+      fetchExtract(r.url, queryTerms, budget, 3, "full", 3000, outgoingFetch as any)
+    );
+    const scraped = await Promise.all(scrapePromises);
+
+    enrichedResults = sliced.map((r, i) => ({
+      title: r.title,
+      url: r.url,
+      snippet: (i < scrapeCount && scraped[i]) ? scraped[i]! : (r.snippet ?? ""),
+    }));
+  }
+
+  const sources: SourceResult[] = enrichedResults.map((r) => ({
+    title: r.title,
+    url: r.url,
+    snippet: r.snippet,
   }));
 
   c.header("Content-Type", "text/event-stream");
@@ -163,7 +189,7 @@ router.post("/api/ai-summary/stream", async (c) => {
       let tokenCount = 0;
 
       try {
-        for await (const chunk of chatCompleteStream(query, sliced, streamMode)) {
+        for await (const chunk of chatCompleteStream(query, enrichedResults, streamMode)) {
           if (chunk.type === "token") {
             accumulated += chunk.text;
             tokenCount++;

@@ -133,7 +133,14 @@
           try {
             const parsed = JSON.parse(data);
             if (eventType === "tokens") {
-              answerEl.innerHTML = parsed.html;
+              // Strip partial followups code block that may appear during streaming
+              let streamHtml = parsed.html;
+              const fIdx = streamHtml.indexOf('<code class="language-followups"');
+              if (fIdx !== -1) {
+                const blockStart = streamHtml.lastIndexOf('<div class="ai-code-block">', fIdx);
+                if (blockStart !== -1) streamHtml = streamHtml.slice(0, blockStart);
+              }
+              answerEl.innerHTML = streamHtml;
             } else if (eventType === "done") {
               answerEl.innerHTML = parsed.html;
               setupCopyButtons(answerEl);
