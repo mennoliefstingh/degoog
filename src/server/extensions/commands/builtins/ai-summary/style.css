@@ -197,6 +197,13 @@
   background: rgba(127, 127, 127, 0.1);
 }
 
+.ai-cite-label {
+  color: var(--text-cite, var(--text-link, var(--link-color)));
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: rgba(127, 127, 127, 0.1);
+}
+
 .ai-cite a:hover {
   background: rgba(127, 127, 127, 0.2);
 }
@@ -204,18 +211,17 @@
 /* Citation tooltip */
 .ai-cite-tooltip {
   display: none;
-  position: absolute;
-  bottom: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--tooltip-bg, #1e1e2e);
-  color: var(--tooltip-text, #cdd6f4);
-  border: 1px solid var(--border-color, #45475a);
+}
+
+.ai-cite-popover {
+  position: fixed;
+  background: var(--bg-light, #fafafa);
+  color: var(--text-primary, #343536);
+  border: 1px solid var(--border, #c8d0da);
   border-radius: 8px;
   padding: 8px 12px;
   min-width: 200px;
-  max-width: 320px;
-  z-index: 1000;
+  z-index: 2147483647;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
   white-space: normal;
   font-size: 0.85rem;
@@ -223,8 +229,10 @@
   pointer-events: none;
 }
 
-.ai-cite:hover .ai-cite-tooltip {
-  display: block;
+@media (hover: none) {
+  .ai-cite-popover {
+    pointer-events: auto;
+  }
 }
 
 .ai-cite-source {
@@ -234,7 +242,7 @@
   margin-bottom: 2px;
 }
 
-.ai-cite-tooltip b {
+.ai-cite-popover b {
   display: block;
   color: inherit;
   margin-bottom: 4px;
@@ -268,11 +276,17 @@
 
 .ai-ref-list {
   list-style: decimal;
-  padding-left: 1.5em;
+  padding-left: 1.75em;
   margin: 0;
 }
 
 .ai-ref-item {
+  display: list-item;
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+.ai-ref-content {
   display: flex;
   align-items: baseline;
   gap: 0.75em;
@@ -281,7 +295,6 @@
   line-height: 1.5;
   background: var(--bg-hover, rgba(127, 127, 127, 0.06));
   border-radius: 6px;
-  margin-bottom: 4px;
 }
 
 .ai-ref-title {

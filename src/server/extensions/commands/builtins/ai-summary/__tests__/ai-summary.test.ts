@@ -148,7 +148,8 @@ describe("render-summary", () => {
     expect(html).toContain("<ul>");
     expect(html).toContain("<li>one</li>");
     expect(html).toContain("<pre><code");
-    expect(html).toContain("const x = 1;");
+    expect(html).toContain("x =");
+    expect(html).toContain('hljs-number">1</span>;');
   });
 
   test("decorateCitations replaces citations with tooltip markup", () => {
@@ -172,12 +173,51 @@ describe("render-summary", () => {
     expect(html).toContain("<code>Inline code [1]</code>");
   });
 
+  test("decorateCitations does not link unsafe source URLs", () => {
+    const html = decorateCitations("<p>Answer [1] [2]</p>", [
+      {
+        title: "JavaScript source",
+        url: "javascript:alert(1)",
+        snippet: "Unsafe snippet",
+      },
+      {
+        title: "Data source",
+        url: "data:text/html,<script>alert(1)</script>",
+        snippet: "Unsafe snippet",
+      },
+    ]);
+
+    expect(html).toContain('<span class="ai-cite-label">1</span>');
+    expect(html).toContain('<span class="ai-cite-label">2</span>');
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain("data:text");
+    expect(html).not.toContain("<a href=");
+  });
+
   test("buildReferences only includes cited sources", () => {
     const html = buildReferences(results, [2]);
 
     expect(html).toContain("Second source");
     expect(html).not.toContain("First source");
     expect(html).not.toContain("Third source");
+  });
+
+  test("buildReferences omits unsafe source URLs", () => {
+    const html = buildReferences(
+      [
+        {
+          title: "Unsafe source",
+          url: "javascript:alert(1)",
+          snippet: "Unsafe snippet",
+        },
+        results[1],
+      ],
+      [1, 2],
+    );
+
+    expect(html).not.toContain("Unsafe source");
+    expect(html).not.toContain("javascript:");
+    expect(html).toContain("Second source");
   });
 
   test("buildReferences shows citation percentages", () => {

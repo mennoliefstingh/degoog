@@ -9,7 +9,7 @@ import {
 import { createCache } from "../utils/cache";
 import { getLocale } from "../utils/hono";
 import { logger } from "../utils/logger";
-import { outgoingFetch } from "../utils/outgoing";
+import { isSafePublicUrlForOutgoing, outgoingFetch } from "../utils/outgoing";
 import { isDisabled } from "../utils/plugin-settings";
 import { buildSignedProxyUrl } from "../utils/proxy-sign";
 import { getClientIp } from "../utils/request";
@@ -149,21 +149,52 @@ router.post("/api/ai-summary/stream", async (c) => {
   }));
 
   if (streamMode === "full" && settings.extendedContext !== "off") {
-    const { fetchExtract } = await import("../utils/page-extract");
-    const queryTerms = query.toLowerCase().split(/\s+/).filter(Boolean);
-    const scrapeCount = settings.extendedContext === "all" ? sliced.length : Math.min(3, sliced.length);
-    const budget = settings.extendedContextBudget;
+    try {
+      const { fetchExtract } = await import("../utils/page-extract");
+      const queryTerms = query.toLowerCase().split(/\s+/).filter(Boolean);
+      const scrapeCount = settings.extendedContext === "all" ? sliced.length : Math.min(3, sliced.length);
+      const budget = settings.extendedContextBudget;
 
-    const scrapePromises = sliced.slice(0, scrapeCount).map((r) =>
-      fetchExtract(r.url, queryTerms, budget, 3, "full", 3000, outgoingFetch as any)
-    );
-    const scraped = await Promise.all(scrapePromises);
+      // Hard 4s deadline for all scraping combined
+      const scrapeCandidates = await Promise.all(
+        sliced.slice(0, scrapeCount).map(async (r) => ({
+          result: r,
+          safe: await isSafePublicUrlForOutgoing(r.url),
+        })),
+      );
+      const scrapePromises = scrapeCandidates.map(({ result, safe }) =>
+        safe
+          ? fetchExtract(result.url, queryTerms, budget, 3, "full", 3000, (url, init) => {
+              const headers =
+                init?.headers instanceof Headers
+                  ? Object.fromEntries(init.headers.entries())
+                  : Array.isArray(init?.headers)
+                    ? Object.fromEntries(init.headers)
+                    : init?.headers;
+              return outgoingFetch(url, {
+                method: init?.method,
+                headers,
+                redirect: init?.redirect,
+                signal: init?.signal ?? undefined,
+              });
+            })
+          : Promise.resolve(null),
+      );
+      const scraped = await Promise.race([
+        Promise.all(scrapePromises),
+        new Promise<(string | null)[]>((resolve) => setTimeout(() => resolve([]), 4000)),
+      ]);
 
-    enrichedResults = sliced.map((r, i) => ({
-      title: r.title,
-      url: r.url,
-      snippet: (i < scrapeCount && scraped[i]) ? scraped[i]! : (r.snippet ?? ""),
-    }));
+      if (scraped.length > 0) {
+        enrichedResults = sliced.map((r, i) => ({
+          title: r.title,
+          url: r.url,
+          snippet: (i < scrapeCount && scraped[i]) ? scraped[i]! : (r.snippet ?? ""),
+        }));
+      }
+    } catch {
+      // Scraping failed entirely — use original snippets
+    }
   }
 
   const sources: SourceResult[] = enrichedResults.map((r) => ({
@@ -181,73 +212,80 @@ router.post("/api/ai-summary/stream", async (c) => {
     async start(controller) {
       const encoder = new TextEncoder();
       const send = (event: string, data: unknown) => {
-        controller.enqueue(
-          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-        );
+        try {
+          controller.enqueue(
+            encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+          );
+        } catch {
+          // Controller already closed — ignore
+        }
       };
 
       let accumulated = "";
       let tokenCount = 0;
+      let sentTerminal = false;
 
       try {
         for await (const chunk of chatCompleteStream(query, enrichedResults, streamMode)) {
           if (chunk.type === "token") {
             accumulated += chunk.text;
             tokenCount++;
-            // Re-render every 3 tokens to avoid flickering while staying responsive
             if (tokenCount % 3 === 0) {
               const html = renderMarkdownSafe(stripInvalidCitations(accumulated, sliced.length));
               const decorated = decorateCitations(html, sources);
               send("tokens", { html: decorated });
             }
           } else if (chunk.type === "done") {
-            // Strip any leftover followups fence the LLM may have included
             const cleanedFull = chunk.full.replace(/```followups[\s\S]*?```/g, "").trim();
             const cleanMd = stripInvalidCitations(cleanedFull, sliced.length);
             const finalHtml = decorateCitations(renderMarkdownSafe(cleanMd), sources);
 
-            // Extract cited indices for references
             const citedIndices: number[] = [];
-            const seen = new Set<number>();
             const citRegex = /\[(\d+)\]/g;
             let m: RegExpExecArray | null;
             while ((m = citRegex.exec(cleanedFull)) !== null) {
               const idx = parseInt(m[1], 10);
-              if (idx >= 1 && idx <= sliced.length && !seen.has(idx)) {
-                seen.add(idx);
+              if (idx >= 1 && idx <= sliced.length) {
                 citedIndices.push(idx);
               }
             }
 
             if (streamMode === "compact") {
+              sentTerminal = true;
               send("done", { html: finalHtml, references: "", followups: "", followupQuestions: [] });
             } else {
               const referencesHtml = buildReferences(sources, citedIndices);
-              // Generate followups in parallel (non-blocking for the done event)
-              const answerText = cleanedFull.slice(0, 500);
-              generateFollowups(query, answerText).then((followupQuestions) => {
-                const followupsHtml = buildFollowups(followupQuestions, query);
-                send("followups", { followups: followupsHtml, followupQuestions });
-                controller.close();
-              }).catch(() => {
-                controller.close();
-              });
-              send("done", {
-                html: finalHtml,
-                references: referencesHtml,
-                followups: "",
-                followupQuestions: [],
-              });
-              return; // Don't close controller yet — wait for followups
+              sentTerminal = true;
+              send("done", { html: finalHtml, references: referencesHtml, followups: "", followupQuestions: [] });
+
+              // Fire-and-forget followups with hard 5s timeout
+              try {
+                const answerText = cleanedFull.slice(0, 500);
+                const followupQuestions = await Promise.race([
+                  generateFollowups(query, answerText),
+                  new Promise<string[]>((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+                ]);
+                if (followupQuestions.length > 0) {
+                  const followupsHtml = buildFollowups(followupQuestions, query);
+                  send("followups", { followups: followupsHtml, followupQuestions });
+                }
+              } catch {
+                // Followup generation failed or timed out — not critical
+              }
             }
           }
         }
       } catch (err) {
         logger.warn(AI_SUMMARY_ID, "Stream error", err);
+        sentTerminal = true;
         send("error", { message: "Stream failed" });
+      } finally {
+        if (!sentTerminal) {
+          send("error", { message: "Stream failed" });
+        }
+        // ALWAYS close the stream — no dangling connections
+        controller.close();
       }
-
-      controller.close();
     },
   });
 

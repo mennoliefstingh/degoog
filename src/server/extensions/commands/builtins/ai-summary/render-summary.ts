@@ -59,7 +59,7 @@ marked.use(
 
 // Server-side DOMPurify needs a window from jsdom
 const window = new JSDOM("").window;
-const purify = DOMPurify(window as any);
+const purify = DOMPurify(window);
 
 const ALLOWED_TAGS = [
   "p",
@@ -150,20 +150,21 @@ export function decorateCitations(
         const idx = parseInt(numStr, 10);
         if (idx < 1 || idx > results.length) return full;
         const source = results[idx - 1];
-        const escapedTitle = _escapeAttr(source.title);
         const escapedSnippet = _escapeAttr(
           source.snippet.length > 150
             ? source.snippet.slice(0, 150) + "…"
             : source.snippet,
         );
-        const escapedUrl = _escapeAttr(source.url);
-        const domain = _extractDomain(source.url);
+        const safeHref = _safeHttpHref(source.url);
+        const domain = safeHref ? _extractDomain(source.url) : "";
 
         return (
           `<sup class="ai-cite" data-cite="${idx}">` +
-          `<a href="${escapedUrl}" target="_blank" rel="noopener">${idx}</a>` +
+          (safeHref
+            ? `<a href="${safeHref}" target="_blank" rel="noopener">${idx}</a>`
+            : `<span class="ai-cite-label">${idx}</span>`) +
           `<span class="ai-cite-tooltip">` +
-          `<span class="ai-cite-source">${_escapeHtml(domain)}</span>` +
+          (domain ? `<span class="ai-cite-source">${_escapeHtml(domain)}</span>` : "") +
           `<b>${_escapeHtml(source.title)}</b>` +
           `<span class="ai-cite-passage">${_escapeHtml(escapedSnippet)}</span>` +
           `</span>` +
@@ -198,6 +199,8 @@ export function buildReferences(
     .map((idx) => {
       const source = results[idx - 1];
       if (!source) return "";
+      const safeHref = _safeHttpHref(source.url);
+      if (!safeHref) return "";
       const count = citeCounts.get(idx) ?? 1;
       const pct = Math.round((count / totalCitations) * 100);
       const domain = _extractDomain(source.url);
@@ -205,10 +208,12 @@ export function buildReferences(
 
       return (
         `<li class="ai-ref-item">` +
-        `<a class="ai-ref-title" href="${_escapeAttr(source.url)}" target="_blank" rel="noopener">${_escapeHtml(source.title)}</a>` +
+        `<span class="ai-ref-content">` +
+        `<a class="ai-ref-title" href="${safeHref}" target="_blank" rel="noopener">${_escapeHtml(source.title)}</a>` +
         `<span class="ai-ref-meta">` +
         `<span class="ai-ref-domain">${_escapeHtml(domain)}</span>` +
         `<span class="ai-ref-pct">${pctDisplay}</span>` +
+        `</span>` +
         `</span>` +
         `</li>`
       );
@@ -227,7 +232,7 @@ export function buildReferences(
 /**
  * Build follow-up suggestions HTML.
  */
-export function buildFollowups(followups: string[], query: string): string {
+export function buildFollowups(followups: string[], _query: string): string {
   if (followups.length === 0) return "";
 
   const items = followups
@@ -261,7 +266,11 @@ function _escapeHtml(s: string): string {
 }
 
 function _escapeAttr(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/'/g, "&#39;");
 }
 
 function _extractDomain(url: string): string {
@@ -269,5 +278,17 @@ function _extractDomain(url: string): string {
     return new URL(url).hostname.replace(/^www\./, "");
   } catch {
     return url;
+  }
+}
+
+function _safeHttpHref(url: string): string | null {
+  const trimmed = url.trim();
+  if (trimmed !== url || /[\u0000-\u001f\u007f\s]/.test(trimmed)) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return _escapeAttr(parsed.toString());
+  } catch {
+    return null;
   }
 }

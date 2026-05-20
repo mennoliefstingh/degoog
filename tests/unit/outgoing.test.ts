@@ -1,5 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import {
+  isPrivateIpAddress,
+  isSafePublicUrlForOutgoing,
   setOutgoingAllowlist,
   isUrlAllowedForOutgoing,
 } from "../../src/server/utils/outgoing";
@@ -60,6 +62,40 @@ describe("outgoing", () => {
     test("empty allowlist denies all", () => {
       setOutgoingAllowlist([]);
       expect(isUrlAllowedForOutgoing("https://example.com")).toBe(false);
+    });
+
+    describe("isPrivateIpAddress", () => {
+      test("detects private and loopback IPv4 ranges", () => {
+        expect(isPrivateIpAddress("127.0.0.1")).toBe(true);
+        expect(isPrivateIpAddress("10.0.0.8")).toBe(true);
+        expect(isPrivateIpAddress("172.16.0.1")).toBe(true);
+        expect(isPrivateIpAddress("192.168.1.1")).toBe(true);
+        expect(isPrivateIpAddress("169.254.169.254")).toBe(true);
+        expect(isPrivateIpAddress("8.8.8.8")).toBe(false);
+      });
+
+      test("detects private and loopback IPv6 ranges", () => {
+        expect(isPrivateIpAddress("::1")).toBe(true);
+        expect(isPrivateIpAddress("fc00::1")).toBe(true);
+        expect(isPrivateIpAddress("fe80::1")).toBe(true);
+        expect(isPrivateIpAddress("::ffff:127.0.0.1")).toBe(true);
+        expect(isPrivateIpAddress("2606:4700:4700::1111")).toBe(false);
+      });
+    });
+
+    describe("isSafePublicUrlForOutgoing", () => {
+      test("rejects unsafe protocols and local hostnames", async () => {
+        expect(await isSafePublicUrlForOutgoing("javascript:alert(1)")).toBe(false);
+        expect(await isSafePublicUrlForOutgoing("file:///etc/passwd")).toBe(false);
+        expect(await isSafePublicUrlForOutgoing("http://localhost/search")).toBe(false);
+        expect(await isSafePublicUrlForOutgoing("http://service.local/search")).toBe(false);
+      });
+
+      test("rejects private IP literals and userinfo", async () => {
+        expect(await isSafePublicUrlForOutgoing("http://127.0.0.1/")).toBe(false);
+        expect(await isSafePublicUrlForOutgoing("http://[::1]/")).toBe(false);
+        expect(await isSafePublicUrlForOutgoing("https://user@example.com/")).toBe(false);
+      });
     });
   });
 });

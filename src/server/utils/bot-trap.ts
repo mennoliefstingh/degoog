@@ -43,6 +43,7 @@ export const isBlocked = async (ip: string): Promise<boolean> => {
 };
 
 export const blockIp = async (ip: string): Promise<void> => {
+  if (!ip || ip === "unknown") return;
   await addEntry(ip);
 };
 

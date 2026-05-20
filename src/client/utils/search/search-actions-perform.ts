@@ -178,7 +178,10 @@ export async function performSearch(
   }
   const glanceEl = document.getElementById("at-a-glance");
   if (glanceEl)
-    glanceEl.innerHTML = resolvedType === "web" ? skeletonGlance() : "";
+    glanceEl.innerHTML =
+      resolvedType === "web" && query.trim().endsWith("?")
+        ? skeletonGlance()
+        : "";
   const resultsList = document.getElementById("results-list");
   if (resultsList) {
     if (resolvedType === "images") {

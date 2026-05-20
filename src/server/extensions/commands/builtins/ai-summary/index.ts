@@ -154,7 +154,8 @@ function escapeHtml(s: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 const DEFAULT_SYSTEM_PROMPT = `You are an expert search assistant. Answer the user's query using the provided search results.
@@ -451,13 +452,11 @@ export async function generateAISummary(
 
   // Extract cited indices
   const citedIndices: number[] = [];
-  const seen = new Set<number>();
   const citRegex = /\[(\d+)\]/g;
   let match: RegExpExecArray | null;
   while ((match = citRegex.exec(cleanedRaw)) !== null) {
     const idx = parseInt(match[1], 10);
-    if (idx >= 1 && idx <= sliced.length && !seen.has(idx)) {
-      seen.add(idx);
+    if (idx >= 1 && idx <= sliced.length) {
       citedIndices.push(idx);
     }
   }
@@ -502,7 +501,7 @@ const aiSummarySlot: SlotPlugin = {
   async trigger(query: string): Promise<boolean> {
     const settings = await getAISummarySettings();
     if (!settings.baseUrl || !settings.model) return false;
-    // Always trigger when plugin is enabled — mode (compact/full) determined in execute()
+    if (settings.questionMarkOnly && !query.trim().endsWith("?")) return false;
     return true;
   },
   async execute(query, context): Promise<{ title?: string; html: string }> {
@@ -525,11 +524,12 @@ const aiSummarySlot: SlotPlugin = {
     const resultsPayload = JSON.stringify(
       results.slice(0, 6).map((r) => ({ title: r.title, url: r.url, snippet: r.snippet })),
     );
+    const escapedResultsPayload = escapeHtml(resultsPayload);
 
     if (mode === "compact") {
       return {
         html:
-          `<div class="glance-ai glance-ai--compact degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack" data-stream-query="${escapeHtml(query)}" data-stream-results='${resultsPayload.replace(/'/g, "&#39;")}' data-stream-mode="compact">` +
+          `<div class="glance-ai glance-ai--compact degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack" data-stream-query="${escapeHtml(query)}" data-stream-results="${escapedResultsPayload}" data-stream-mode="compact">` +
           '<div class="glance-ai-answer degoog-text degoog-text--md">' +
           '<div class="glance-ai-skeleton"><div class="skel-line skel-line--long"></div><div class="skel-line skel-line--med"></div></div>' +
           "</div>" +
@@ -543,7 +543,7 @@ const aiSummarySlot: SlotPlugin = {
     // Full mode placeholder
     return {
       html:
-        `<div class="glance-ai glance-ai--full degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack" data-stream-query="${escapeHtml(query)}" data-stream-results='${resultsPayload.replace(/'/g, "&#39;")}' data-stream-mode="full">` +
+        `<div class="glance-ai glance-ai--full degoog-panel degoog-panel--slot degoog-panel--slot-body-padded degoog-vstack" data-stream-query="${escapeHtml(query)}" data-stream-results="${escapedResultsPayload}" data-stream-mode="full">` +
         '<div class="glance-ai-answer degoog-text degoog-text--md">' +
         '<div class="glance-ai-skeleton"><div class="skel-line skel-line--long"></div><div class="skel-line skel-line--med"></div><div class="skel-line skel-line--short"></div></div>' +
         "</div>" +

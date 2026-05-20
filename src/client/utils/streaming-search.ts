@@ -8,16 +8,15 @@ import { MAX_PAGE } from "../constants";
 import {
   closeMediaPreview,
   destroyMediaObserver,
+  setupMediaObserver,
 } from "../modules/media/media";
 import {
   attachVideoPlayers,
   clearSlotPanels,
   renderPagination,
-  renderResults,
   renderSidebar,
 } from "../modules/renderer/render";
 import { appendMediaCards, renderMediaEngineBar } from "../modules/renderer/render-media";
-import { setupMediaObserver } from "../modules/media/media";
 import { state } from "../state";
 import {
   EngineTiming,
@@ -135,7 +134,9 @@ export async function performStreamingSearch(
     abortSlotPanels();
   }
   const glanceEl = document.getElementById("at-a-glance");
-  if (glanceEl) glanceEl.innerHTML = type === "web" ? skeletonGlance() : "";
+  if (glanceEl)
+    glanceEl.innerHTML =
+      type === "web" && query.trim().endsWith("?") ? skeletonGlance() : "";
   document.title = `${query} - degoog`;
 
   const urlParams = new URLSearchParams({ q: query });

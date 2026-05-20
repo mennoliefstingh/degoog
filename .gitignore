@@ -9,4 +9,5 @@ stores
 dist
 mcp
 degoog-cli
-.DS_Storepackage-lock.json
+.DS_Store
+package-lock.json

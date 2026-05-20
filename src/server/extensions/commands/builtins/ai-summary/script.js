@@ -59,6 +59,85 @@
     textarea.style.height = textarea.scrollHeight + "px";
   }
 
+  let activeCitation = null;
+  let activePopover = null;
+  let touchOpenedCitation = null;
+
+  function hideCitationPopover() {
+    if (activePopover) activePopover.remove();
+    activePopover = null;
+    activeCitation = null;
+    touchOpenedCitation = null;
+  }
+
+  function positionCitationPopover(cite, popover) {
+    const rect = cite.getBoundingClientRect();
+    popover.style.maxWidth = Math.min(320, window.innerWidth - 16) + "px";
+    const popRect = popover.getBoundingClientRect();
+    let left = rect.left + rect.width / 2 - popRect.width / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - popRect.width - 8));
+    let top = rect.top - popRect.height - 8;
+    if (top < 8) top = rect.bottom + 8;
+    popover.style.left = left + "px";
+    popover.style.top = Math.max(8, top) + "px";
+  }
+
+  function showCitationPopover(cite) {
+    const tooltip = cite.querySelector(".ai-cite-tooltip");
+    if (!tooltip) return;
+    hideCitationPopover();
+    const popover = document.createElement("div");
+    popover.className = "ai-cite-popover";
+    popover.innerHTML = tooltip.innerHTML;
+    document.body.appendChild(popover);
+    activeCitation = cite;
+    activePopover = popover;
+    positionCitationPopover(cite, popover);
+  }
+
+  function setupCitationPopovers(container) {
+    const isTouchUi = () =>
+      window.matchMedia("(hover: none)").matches || navigator.maxTouchPoints > 0;
+    container.querySelectorAll(".ai-cite").forEach((cite) => {
+      if (cite.dataset.popoverBound) return;
+      cite.dataset.popoverBound = "1";
+      cite.addEventListener("pointerenter", () => showCitationPopover(cite));
+      cite.addEventListener("pointerleave", hideCitationPopover);
+      cite.addEventListener("pointerdown", (e) => {
+        if (e.pointerType !== "touch" || activeCitation === cite) return;
+        e.preventDefault();
+        showCitationPopover(cite);
+        touchOpenedCitation = cite;
+      });
+      cite.addEventListener(
+        "touchstart",
+        (e) => {
+          if (activeCitation === cite) return;
+          e.preventDefault();
+          showCitationPopover(cite);
+          touchOpenedCitation = cite;
+        },
+        { passive: false },
+      );
+      cite.addEventListener("focusin", () => showCitationPopover(cite));
+      cite.addEventListener("focusout", hideCitationPopover);
+      cite.addEventListener("click", (e) => {
+        if (!isTouchUi()) return;
+        if (touchOpenedCitation === cite) {
+          touchOpenedCitation = null;
+          e.preventDefault();
+          return;
+        }
+        if (activeCitation === cite) {
+          hideCitationPopover();
+          return;
+        }
+        e.preventDefault();
+        showCitationPopover(cite);
+      });
+    });
+  }
+
   /** Wire up copy buttons */
   function setupCopyButtons(container) {
     container.querySelectorAll(".ai-code-copy").forEach((btn) => {
@@ -93,12 +172,29 @@
     try {
       results = JSON.parse(resultsJson);
     } catch {
+      answerEl.innerHTML = "<p>" + t("ai-summary.request-failed") + "</p>";
+      delete box.dataset.streamQuery;
+      delete box.dataset.streamResults;
+      delete box.dataset.streamMode;
       return;
     }
+
+    // Hard timeout: if no content after 20s, show error
+    const STREAM_TIMEOUT_MS = 20000;
+    let gotContent = false;
+    const timeoutId = setTimeout(function () {
+      if (!gotContent) {
+        answerEl.innerHTML = "<p>" + t("ai-summary.request-failed") + "</p>";
+        delete box.dataset.streamQuery;
+        delete box.dataset.streamResults;
+        delete box.dataset.streamMode;
+      }
+    }, STREAM_TIMEOUT_MS);
 
     /** Handle a single parsed SSE event */
     function handleEvent(eventType, parsed) {
       if (eventType === "tokens") {
+        gotContent = true;
         let streamHtml = parsed.html;
         // Strip partial followups code block during streaming
         const fIdx = streamHtml.indexOf('<code class="language-followups"');
@@ -107,9 +203,13 @@
           if (blockStart !== -1) streamHtml = streamHtml.slice(0, blockStart);
         }
         answerEl.innerHTML = streamHtml;
+        setupCitationPopovers(answerEl);
       } else if (eventType === "done") {
+        gotContent = true;
+        clearTimeout(timeoutId);
         answerEl.innerHTML = parsed.html;
         setupCopyButtons(answerEl);
+        setupCitationPopovers(answerEl);
 
         if (mode === "full" && parsed.references) {
           const showBtn = document.createElement("button");
@@ -151,6 +251,7 @@
           slot.innerHTML = parsed.followups;
         }
       } else if (eventType === "error") {
+        clearTimeout(timeoutId);
         answerEl.innerHTML = "<p>" + t("ai-summary.request-failed") + "</p>";
       }
     }
@@ -181,49 +282,47 @@
       });
 
       if (!res.ok) {
+        clearTimeout(timeoutId);
         answerEl.innerHTML = "<p>" + t("ai-summary.request-failed") + "</p>";
         return;
       }
 
       // Try streaming with ReadableStream (progressive rendering)
       if (res.body && typeof res.body.getReader === "function") {
-        try {
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
 
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const events = buffer.split("\n\n");
-            buffer = events.pop() || "";
-            for (const block of events) {
-              if (!block.trim()) continue;
-              const lines = block.split("\n");
-              let eventType = "";
-              let data = "";
-              for (const line of lines) {
-                if (line.startsWith("event: ")) eventType = line.slice(7);
-                else if (line.startsWith("data: ")) data = line.slice(6);
-              }
-              if (eventType && data) {
-                try { handleEvent(eventType, JSON.parse(data)); } catch {}
-              }
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split("\n\n");
+          buffer = events.pop() || "";
+          for (const block of events) {
+            if (!block.trim()) continue;
+            const lines = block.split("\n");
+            let eventType = "";
+            let data = "";
+            for (const line of lines) {
+              if (line.startsWith("event: ")) eventType = line.slice(7);
+              else if (line.startsWith("data: ")) data = line.slice(6);
+            }
+            if (eventType && data) {
+              try { handleEvent(eventType, JSON.parse(data)); } catch {}
             }
           }
-          // Process any remaining buffer
-          if (buffer.trim()) parseSSE(buffer);
-          return;
-        } catch {
-          // ReadableStream failed — fall through to text() fallback
         }
+        // Process any remaining buffer
+        if (buffer.trim()) parseSSE(buffer);
+        return;
       }
 
       // Fallback: read entire response as text (iOS Safari compatibility)
       const text = await res.text();
       parseSSE(text);
     } catch {
+      clearTimeout(timeoutId);
       answerEl.innerHTML = "<p>" + t("ai-summary.request-failed") + "</p>";
     }
   }
@@ -231,7 +330,6 @@
   /** Set up the follow-up chat functionality */
   function setupChat(box, container) {
     const input = container.querySelector(".glance-ai-input");
-    const messagesEl = box.querySelector(".glance-ai-messages") || container;
     if (!input) return;
 
     const answerEl = box.querySelector(".glance-ai-answer");
@@ -333,6 +431,7 @@
 
     // Cached full response — wire up interactions
     setupCopyButtons(box);
+    setupCitationPopovers(box);
 
     // Wire up "Show more" button if present
     const showBtn = box.querySelector(".ai-show-more");
@@ -376,4 +475,9 @@
   }
 
   watchForGlanceAi();
+  window.addEventListener("scroll", hideCitationPopover, true);
+  window.addEventListener("resize", hideCitationPopover);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") hideCitationPopover();
+  });
 })();

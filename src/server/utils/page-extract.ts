@@ -7,10 +7,13 @@ import * as cheerio from "cheerio";
 import { looksLikeProse } from "./text";
 import { getRandomUserAgent } from "./user-agents";
 import { createCache, type TtlCache } from "./cache";
+import { isSafePublicUrlForOutgoing } from "./outgoing";
 
 export type ExcerptMode = "strict" | "full";
 
 let _extractCache: TtlCache<string> = createCache<string>(60 * 60 * 1000);
+const MAX_EXTRACT_BYTES = 2 * 1024 * 1024;
+const MAX_REDIRECTS = 3;
 
 /** Allow plugins to replace the cache instance (e.g. with a context-provided one) */
 export function setExtractCache(cache: TtlCache<string>): void {
@@ -102,6 +105,38 @@ function _cacheKey(
   return `${url}\x1e${excerptMode}\x1e${maxLength}\x1e${maxParagraphs}\x1e${termsKey}`;
 }
 
+async function readTextWithLimit(
+  res: Response,
+  maxBytes: number,
+): Promise<string> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) throw new Error("response body too large");
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+    return text;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function redirectTarget(location: string, currentUrl: string): string | null {
+  try {
+    return new URL(location, currentUrl).toString();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Fetch a URL and extract relevant prose paragraphs.
  * Results are cached for 1 hour.
@@ -118,19 +153,31 @@ export async function fetchExtract(
   const key = _cacheKey(url, excerptMode, maxLength, maxParagraphs, queryTerms);
   const cached = _extractCache.get(key);
   if (cached !== null) return cached;
+  if (!(await isSafePublicUrlForOutgoing(url))) return null;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetchFn(url, {
-      signal: controller.signal,
-      headers: { "User-Agent": getRandomUserAgent(), Accept: "text/html" },
-    });
-    clearTimeout(timer);
+    let currentUrl = url;
+    let res: Response | null = null;
+    for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
+      res = await fetchFn(currentUrl, {
+        signal: controller.signal,
+        redirect: "manual",
+        headers: { "User-Agent": getRandomUserAgent(), Accept: "text/html" },
+      });
+      if (res.status < 300 || res.status >= 400) break;
+      const location = res.headers.get("location");
+      if (!location || redirects === MAX_REDIRECTS) return null;
+      const nextUrl = redirectTarget(location, currentUrl);
+      if (!nextUrl || !(await isSafePublicUrlForOutgoing(nextUrl))) return null;
+      currentUrl = nextUrl;
+    }
+    if (!res) return null;
     if (!res.ok) return null;
     const ct = res.headers.get("content-type") ?? "";
     if (!ct.includes("text/html")) return null;
-    const html = await res.text();
+    const html = await readTextWithLimit(res, MAX_EXTRACT_BYTES);
     const extracted = extractFromHtml(
       html,
       queryTerms,
@@ -141,7 +188,8 @@ export async function fetchExtract(
     if (extracted) _extractCache.set(key, extracted);
     return extracted;
   } catch {
-    clearTimeout(timer);
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }

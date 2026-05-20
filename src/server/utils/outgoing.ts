@@ -11,6 +11,8 @@
  *
  */
 
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { fetch as bunFetch } from "bun";
 import { resolveTransport } from "../extensions/transports/registry";
 import type {
@@ -21,6 +23,7 @@ import type {
 } from "../types";
 import { fetchViaHttpProxy } from "./http-proxy-fetch";
 import { logger } from "./logger";
+import { getBaseUrl } from "./base-url";
 import { asBoolean, getSettings } from "./plugin-settings";
 import { fetchViaSocks, isSocksProxy } from "./socks-fetch";
 
@@ -35,6 +38,12 @@ export function parseOutgoingTransport(raw: string | undefined): string {
 }
 
 let allowedHosts: Set<string> | null = null;
+
+const LOCAL_HOSTS = new Set([
+  "localhost",
+  "host.docker.internal",
+  "gateway.docker.internal",
+]);
 
 /** @deprecated Legacy outgoing-fetch allowlist. Sign image URLs with ctx.signProxyUrl instead. */
 export function setOutgoingAllowlist(hosts: string[]): void {
@@ -87,6 +96,162 @@ export function isUrlAllowedForOutgoing(url: string): boolean {
   if (allowedHosts.has("*")) return true;
   const host = new URL(url).hostname.toLowerCase();
   return allowedHosts.has(host);
+}
+
+function ipv4ToInt(address: string): number | null {
+  const parts = address.split(".");
+  if (parts.length !== 4) return null;
+  let out = 0;
+  for (const part of parts) {
+    if (!/^\d+$/.test(part)) return null;
+    const n = Number(part);
+    if (!Number.isInteger(n) || n < 0 || n > 255) return null;
+    out = (out << 8) + n;
+  }
+  return out >>> 0;
+}
+
+function ipv4InCidr(address: string, base: string, bits: number): boolean {
+  const ip = ipv4ToInt(address);
+  const network = ipv4ToInt(base);
+  if (ip === null || network === null) return false;
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return (ip & mask) === (network & mask);
+}
+
+function parseIpv6Groups(address: string): number[] | null {
+  const zoneIndex = address.indexOf("%");
+  const withoutZone = zoneIndex === -1 ? address : address.slice(0, zoneIndex);
+  let normalized = withoutZone.toLowerCase();
+  if (normalized.includes(".")) {
+    const lastColon = normalized.lastIndexOf(":");
+    const ipv4 = normalized.slice(lastColon + 1);
+    const n = ipv4ToInt(ipv4);
+    if (n === null) return null;
+    normalized =
+      normalized.slice(0, lastColon) +
+      `:${((n >>> 16) & 0xffff).toString(16)}:${(n & 0xffff).toString(16)}`;
+  }
+
+  const halves = normalized.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = halves.length === 2 ? 8 - left.length - right.length : 0;
+  if (missing < 0 || (halves.length === 1 && left.length !== 8)) return null;
+
+  const rawGroups = [...left, ...Array(missing).fill("0"), ...right];
+  const groups = rawGroups.map((part) => {
+    if (!/^[0-9a-f]{1,4}$/.test(part)) return -1;
+    return parseInt(part, 16);
+  });
+  return groups.length === 8 && groups.every((n) => n >= 0) ? groups : null;
+}
+
+export function isPrivateIpAddress(address: string): boolean {
+  if (isIP(address) === 4) {
+    const blockedRanges: [string, number][] = [
+      ["0.0.0.0", 8],
+      ["10.0.0.0", 8],
+      ["100.64.0.0", 10],
+      ["127.0.0.0", 8],
+      ["169.254.0.0", 16],
+      ["172.16.0.0", 12],
+      ["192.0.0.0", 24],
+      ["192.0.2.0", 24],
+      ["192.168.0.0", 16],
+      ["198.18.0.0", 15],
+      ["198.51.100.0", 24],
+      ["203.0.113.0", 24],
+      ["224.0.0.0", 4],
+      ["240.0.0.0", 4],
+    ];
+    return blockedRanges.some(([base, bits]) =>
+      ipv4InCidr(address, base, bits),
+    );
+  }
+
+  if (isIP(address) !== 6) return true;
+  const groups = parseIpv6Groups(address);
+  if (!groups) return true;
+
+  const mappedIpv4 =
+    groups.slice(0, 5).every((n) => n === 0) && groups[5] === 0xffff;
+  if (mappedIpv4) {
+    return isPrivateIpAddress(
+      `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`,
+    );
+  }
+
+  const allZero = groups.every((n) => n === 0);
+  const loopback =
+    groups.slice(0, 7).every((n) => n === 0) && groups[7] === 1;
+  return (
+    allZero ||
+    loopback ||
+    (groups[0] & 0xfe00) === 0xfc00 ||
+    (groups[0] & 0xffc0) === 0xfe80 ||
+    (groups[0] & 0xff00) === 0xff00 ||
+    (groups[0] === 0x2001 && groups[1] === 0x0db8)
+  );
+}
+
+function hostnameLooksLocal(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  return (
+    LOCAL_HOSTS.has(host) ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal")
+  );
+}
+
+function isConfiguredSelfHost(hostname: string): boolean {
+  const baseUrl = getBaseUrl();
+  if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) return false;
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() === hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+export function isHttpUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export async function isSafePublicUrlForOutgoing(url: string): Promise<boolean> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  if (parsed.username || parsed.password) return false;
+
+  const hostname = parsed.hostname;
+  if (!hostname || hostnameLooksLocal(hostname) || isConfiguredSelfHost(hostname)) {
+    return false;
+  }
+
+  const literalIpVersion = isIP(hostname);
+  if (literalIpVersion) return !isPrivateIpAddress(hostname);
+
+  try {
+    const addresses = await lookup(hostname, { all: true, verbatim: true });
+    return (
+      addresses.length > 0 &&
+      addresses.every((a) => !isPrivateIpAddress(a.address))
+    );
+  } catch {
+    return false;
+  }
 }
 
 function _buildProxyFetch(

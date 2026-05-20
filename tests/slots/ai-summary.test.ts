@@ -3,6 +3,7 @@ import {
   setSettings,
   removeSettings,
 } from "../../src/server/utils/plugin-settings";
+import { createCache } from "../../src/server/utils/cache";
 import {
   AI_SUMMARY_ID,
   getAISummarySettings,
@@ -95,5 +96,35 @@ describe("ai-summary questionMarkOnly setting", () => {
     const slot = getSlotPluginById("builtin-ai-summary-slot");
     expect(slot).not.toBeNull();
     expect(await slot!.trigger("test?")).toBe(false);
+  });
+
+  test("execute safely escapes streamed results JSON attribute", async () => {
+    await setSettings(AI_SUMMARY_ID, {
+      baseUrl: "https://api.example.com/v1",
+      model: "test-model",
+      questionMarkOnly: false,
+    });
+    const slot = getSlotPluginById("builtin-ai-summary-slot");
+    expect(slot).not.toBeNull();
+
+    const out = await slot!.execute("test", {
+      createCache,
+      results: [
+        {
+          title: '\"><img src=x onerror=alert(1)>',
+          url: "https://example.com/?a=1&b=2",
+          snippet: "A < B & C's quote",
+          score: 1,
+          source: "test",
+          sources: ["test"],
+        },
+      ],
+    });
+
+    expect(out.html).toContain("data-stream-results=");
+    expect(out.html).not.toContain("<img src=x");
+    expect(out.html).toContain("&quot;&gt;&lt;img");
+    expect(out.html).toContain("&amp;b=2");
+    expect(out.html).toContain("C&#39;s quote");
   });
 });

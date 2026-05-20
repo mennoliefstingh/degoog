@@ -13,6 +13,7 @@ import {
   isDisabled,
 } from "../../../../utils/plugin-settings";
 import { createCache, type TtlCache } from "../../../../utils/cache";
+import { isSafePublicUrlForOutgoing } from "../../../../utils/outgoing";
 import { looksLikeProse, stripSnippetPrefix } from "../../../../utils/text";
 import { getRandomUserAgent } from "../../../../utils/user-agents";
 
@@ -21,6 +22,7 @@ const WIKIPEDIA_SETTINGS_ID = "slot-wikipedia";
 const WIKIPEDIA_HOSTNAME = "wikipedia.org";
 
 let _extractCache: TtlCache<string> = createCache<string>(60 * 60 * 1000);
+const MAX_EXTRACT_BYTES = 2 * 1024 * 1024;
 
 const _escapeHtml = (s: string): string =>
   s
@@ -166,19 +168,20 @@ const _fetchExtract = async (
   );
   const cached = _extractCache.get(cacheKey);
   if (cached !== null) return cached;
+  if (!(await isSafePublicUrlForOutgoing(url))) return null;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetchFn(url, {
       signal: controller.signal,
+      redirect: "error",
       headers: { "User-Agent": getRandomUserAgent(), Accept: "text/html" },
     });
-    clearTimeout(timer);
     if (!res.ok) return null;
     const ct = res.headers.get("content-type") ?? "";
     if (!ct.includes("text/html")) return null;
-    const html = await res.text();
+    const html = await _readTextWithLimit(res, MAX_EXTRACT_BYTES);
     const extracted = _extractFromHtml(
       html,
       queryTerms,
@@ -189,8 +192,33 @@ const _fetchExtract = async (
     if (extracted) _extractCache.set(cacheKey, extracted);
     return extracted;
   } catch {
-    clearTimeout(timer);
     return null;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const _readTextWithLimit = async (
+  res: Response,
+  maxBytes: number,
+): Promise<string> => {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) throw new Error("response body too large");
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+    return text;
+  } finally {
+    reader.releaseLock();
   }
 };
 
